@@ -1,0 +1,89 @@
+kind: module
+name: do-recon-http-fp
+description: Fingerprint a single host - tech stack, CDN, TLS, and response hashes
+tags: fingerprint,http,tech-detect,cdn,tls
+
+params:
+  - name: httpxFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+
+  - name: httpxInterestingFile
+    default: "{{Output}}/fingerprint/httpx-interesting-{{TargetSpace}}.txt"
+
+  - name: httpxFingerprintJsonFile
+    default: "{{Output}}/fingerprint/httpx-fingerprint-{{TargetSpace}}.jsonl"
+  - name: httpInterestingFilteredJsonFile
+    default: "{{Output}}/fingerprint/httpx-interesting-filtered-{{TargetSpace}}.jsonl"
+
+  - name: httpInterestingMarkdownFile
+    default: "{{Output}}/fingerprint/httpx-interesting-filtered-{{TargetSpace}}.md"
+
+  - name: httpxThreads
+    default: "{{ threads * 2 }}"
+
+  - name: httpTimeout
+    default: "15"
+
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+dependencies:
+  commands:
+    - pd-httpx
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: http-data
+    path: "{{httpxFingerprintJsonFile}}"
+    type: jsonl
+    description: HTTP fingerprinting data
+
+  - name: httpInterestingMarkdownFile
+    default: "{{Output}}/fingerprint/httpx-interesting-{{TargetSpace}}.md"
+    type: markdown
+    description: HTTP Fingerprinting Results with Interesting HTTP Responses
+
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating fingerprint output folder"
+    functions:
+      - 'create_folder("{{Output}}/fingerprint")'
+      - 'create_folder("{{Output}}/probing")'
+
+  - name: generate-input-file
+    type: function
+    log: "Generating input file"
+    functions:
+      - exec_cmd("echo {{Target}} | pd-httpx -silent -H '{{defaultUA}}' -t {{httpxThreads}} -timeout {{httpTimeout}} >> {{httpxFile}}")
+      - exec_cmd("cat {{Target}} | pd-httpx -silent -H '{{defaultUA}}' -t {{httpxThreads}} -timeout {{httpTimeout}} >> {{httpxFile}}")
+      - sort_unix("{{httpxFile}}")
+
+  - name: http-fingerprint
+    type: bash
+    log: "Fingerprinting HTTP hosts with pd-httpx"
+    commands:
+      - 'cat {{httpxFile}} | pd-httpx -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpxThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain >> {{httpxFingerprintJsonFile}}'
+
+  - name: beautify-interesting-http-results
+    type: function
+    log: "Beautifying interesting HTTP results"
+    pre_condition: 'file_exists("{{httpxFingerprintJsonFile}}")'
+    functions:
+      - jsonl_filter("{{httpxFingerprintJsonFile}}", "{{httpInterestingFilteredJsonFile}}", "url,title,status_code,content_length,lines,webserver,tech,cdn")
+      - 'convert_jsonl_to_markdown("{{httpInterestingFilteredJsonFile}}", "{{httpInterestingMarkdownFile}}")'
+
+  - name: process-fingerprint-in-db
+    type: function
+    log: "Processing fingerprint in-db"
+    pre_condition: 'file_exists("{{httpxFingerprintJsonFile}}")'
+    functions:
+      - 'db_total_urls("{{httpxFingerprintJsonFile}}")'
+      - 'db_total_assets("{{httpxFingerprintJsonFile}}")'
+      - 'db_import_asset_from_file("{{TargetSpace}}", "{{httpxFingerprintJsonFile}}")'
+    on_error:
+      - action: continue

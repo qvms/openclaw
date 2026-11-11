@@ -1,0 +1,35 @@
+kind: module
+name: do-scan-vuln
+description: Hunt vulnerabilities on a single target with Nuclei
+tags: vuln,nuclei,security,scanning
+
+params:
+  - name: httpxFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+
+  - name: vigoliumJsonOutput
+    default: "{{Output}}/vulnscan/vigolium-{{TargetSpace}}.jsonl"
+
+  - name: vigoliumPrallel
+    default: 5
+dependencies:
+  commands:
+    - vigolium
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: vigolium-jsonl
+    path: "{{vigoliumJsonOutput}}"
+    type: jsonl
+    description: vigolium deep vulnerability scan results in JSONL format
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/vulnscan")'

@@ -1,0 +1,121 @@
+kind: module
+name: do-recon-spider
+description: Crawl and extract secrets from a single web target
+tags: spider, crawl, links, secrets
+
+params:
+  - name: httpxInterestingFile
+    default: "{{Output}}/fingerprint/httpx-interesting-{{TargetSpace}}.txt"
+
+  - name: httpxFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+
+  - name: linkFile
+    default: "{{Output}}/links/links-{{TargetSpace}}.txt"
+  - name: httpResponse
+    default: "{{Output}}/httpx-response/"
+
+  - name: spiderTimeout
+    default: "2h"
+  - name: spiderThreads
+    default: "{{ threads }}"
+  - name: spiderPrallel
+    default: "{{ threads / 2 }}"
+  - name: spiderDepth
+    default: "3"
+
+  - name: crawlingTime
+    default: "30"
+
+  - name: spitolasTimeout
+    default: "5m"
+  - name: spitolasCrawlingTime
+    default: "5m"
+  - name: spitolasConcurrency
+    default: "20"
+  - name: spitolasMaxPerHost
+    default: "20"
+
+  - name: spitolasJsonlOutput
+    default: "{{Output}}/links/spitolas-{{TargetSpace}}.jsonl"
+  - name: spitolasRecordsFile
+    default: "{{Output}}/links/spitolas-records-{{TargetSpace}}.jsonl"
+
+  - name: skipSpidering
+    type: bool
+    default: false
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+  - name: vigoliumDefaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+  - name: trufflehogThreads
+    default: "{{ threads * 6}}"
+
+  - name: httpxThreads
+    default: "{{ threads * 10}}"
+
+reports:
+  - name: links
+    path: "{{Output}}/links/links-{{TargetSpace}}.txt"
+    type: text
+    description: Discovered links
+
+  - name: trufflehog-output
+    path: "{{Output}}/secrets/trufflehog-{{TargetSpace}}-output.txt"
+    type: text
+    description: Trufflehog secrets scan output
+
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating links output folder"
+    functions:
+      - 'create_folder("{{Output}}/links")'
+      - 'create_folder("{{Output}}/secrets")'
+
+  - name: web-crawling
+    type: foreach
+    log: "Crawling web pages with Katana"
+    pre_condition: 'file_exists("{{httpxFile}}")'
+    input: "{{httpxFile}}"
+    variable: line
+    threads: "{{spiderPrallel}}"
+    step:
+      name: katana-single-target
+      type: bash
+      command: 'timeout -k 1m {{spiderTimeout}} katana -silent -depth {{spiderDepth}} -c {{spiderThreads}} -jc -ct {{crawlingTime}} -u [[line]] | sort -u >> {{linkFile}}'
+
+  - name: web-crawling-with-headless-browser
+    type: foreach
+    log: "Crawling web pages with Spitolas (vigolium) Headless Browser"
+    pre_condition: 'file_exists("{{httpxFile}}")'
+    input: "{{httpxFile}}"
+    variable: line
+    threads: "{{spiderPrallel}}"
+    step:
+      name: spitolas-single-target
+      type: bash
+      commands:
+        - "timeout -k 1m {{spitolasTimeout}} vigolium scan --only spidering --db-isolate --soft-fail --silent -H \"{{vigoliumDefaultUA}}\" --concurrency {{spitolasConcurrency}} --max-per-host {{spitolasMaxPerHost}} --spider-max-time {{spitolasCrawlingTime}} --format jsonl --omit-response -o {{Output}}/links/spitolas-raw-[[_id_]].jsonl --target '[[line]]'"
+      on_error:
+        - action: continue
+
+  - name: generate-crawling-data
+    type: function
+    log: "Merging and normalizing Spitolas (vigolium) spider output"
+    functions:
+      - exec_cmd("cat {{Output}}/links/spitolas-raw-*.jsonl > {{spitolasJsonlOutput}} 2>/dev/null")
+      - exec_cmd("cat {{spitolasJsonlOutput}} | jq -r '.data.url // empty' | sort -u >> {{linkFile}}")
+      - exec_cmd("cat {{spitolasJsonlOutput}} | jq -c 'select(.data.url != null) | .data | {url, status_code, title:.response_title, words:.response_words, content_length:.response_content_length, content_type:.response_content_type}' > {{spitolasRecordsFile}}")
+      - exec_cmd("rm -rf {{Output}}/links/spitolas-raw-*.jsonl")
+      - sort_unix("{{linkFile}}")
+    on_error:
+      - action: continue
+
+  - name: unique-crawled-links
+    type: function
+    log: "Sorting and uniquifying crawled links"
+    functions:
+      - db_total_links("{{linkFile}}")
+      - db_import_custom_asset("{{TargetSpace}}", "{{spitolasRecordsFile}}", "spider", "spitolas")

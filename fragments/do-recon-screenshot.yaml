@@ -1,0 +1,66 @@
+kind: fragment
+name: recon-screenshot
+description: Capture visual snapshots of discovered web assets
+tags: screenshot, visual, http
+
+params:
+  - name: screenshotThreads
+    default: "{{ threads / 2 }}"
+  - name: screenTimeout
+    default: "15"
+
+  - name: httpxInterestingFile
+    default: "{{Output}}/fingerprint/httpx-interesting-{{TargetSpace}}.txt"
+
+  - name: screenshotHttpxJsonlFile
+    default: "{{Output}}/screenshots/httpx-screenshots-{{TargetSpace}}.jsonl"
+
+  - name: screenshotHTMLFile
+    default: "{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot-{{TargetSpace}}.html"
+
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+dependencies:
+  commands:
+    - pd-httpx
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: screenshot-gallery
+    path: "{{screenshotHTMLFile}}"
+    type: html
+    description: Screenshot gallery HTML
+
+  - name: screenshot-json
+    path: "{{screenshotHttpxJsonlFile}}"
+    type: jsonl
+    description: Screenshot index file
+
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating screenshot output folder"
+    functions:
+      - 'create_folder("{{Output}}/screenshots/{{TargetSpace}}-screenshots")'
+
+  - name: capture-screenshots
+    type: bash
+    log: "Capturing screenshots with pd-httpx"
+    pre_condition: 'file_exists("{{httpxInterestingFile}}")'
+    command: "cat {{httpxInterestingFile}} | pd-httpx -t {{screenshotThreads}} -no-color -silent -screenshot -screenshot-timeout {{screenTimeout}} -json -system-chrome -store-response-dir {{Output}}/screenshots/{{TargetSpace}}-screenshots/ >> {{screenshotHttpxJsonlFile}}"
+    on_error:
+      - action: continue
+
+  - name: process-screenshots
+    type: function
+    log: "Processing screenshot results"
+    pre_condition: 'file_exists("{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot.html")'
+    functions:
+      - 'move_file("{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot.html", "{{Output}}/screenshots/{{TargetSpace}}-screenshots/screenshot-{{TargetSpace}}.html")'
+    exports:
+      total_screenshots: "dir_length('{{Output}}/screenshots/{{TargetSpace}}-screenshots/')"

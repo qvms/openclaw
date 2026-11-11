@@ -1,0 +1,43 @@
+kind: module
+name: do-util-prepare-repo
+description: Normalize raw input data into HTTP probe files
+tags: normalization,http,probing
+
+params:
+  - name: httpxFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+
+  - name: httpxInterestingFile
+    default: "{{Output}}/fingerprint/httpx-interesting-{{TargetSpace}}.txt"
+
+  - name: httpxFingerprintJsonFile
+    default: "{{Output}}/fingerprint/httpx-fingerprint-{{TargetSpace}}.jsonl"
+
+  - name: httpInterestingFilteredJsonFile
+    default: "{{Output}}/fingerprint/httpx-interesting-filtered-{{TargetSpace}}.jsonl"
+
+  - name: httpInterestingMarkdownFile
+    default: "{{Output}}/fingerprint/httpx-interesting-filtered-{{TargetSpace}}.md"
+
+  - name: httpxThreads
+    default: "{{ threads * 2 }}"
+
+  - name: httpTimeout
+    default: "15"
+
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating fingerprint output folder"
+    functions:
+      - 'create_folder("{{Output}}/probing")'
+
+  - name: generate-input-file
+    type: function
+    log: "Generating input file"
+    functions:
+      - exec_cmd("echo {{Target}} | pd-httpx -silent -H '{{defaultUA}}' -t {{httpxThreads}} -nf -timeout {{httpTimeout}} >> {{httpxFile}}")
+      - exec_cmd("cat {{Target}} | pd-httpx -silent -H '{{defaultUA}}' -t {{httpxThreads}} -nf -timeout {{httpTimeout}} >> {{httpxFile}}")
+      - sort_unix("{{httpxFile}}")
