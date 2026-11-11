@@ -1,0 +1,31 @@
+kind: flow
+name: web-sniper
+tags: recon, domain, standard
+
+params:
+  - name: enableDnsBruteFocing
+    default: "false"
+  - name: enableStoreHTTPResponse
+    default: "true"
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+modules:
+  - name: prep-stage
+    path: bark/preparation.yaml
+
+  - name: screenshot-stage
+    path: bark/screenshots.yaml
+    depends_on: [prep-stage]
+
+  - name: scan-stage
+    path: bark/nuke.yaml
+    depends_on: [prep-stage]
+
+  - name: results-stage
+    path: bark/finish.yaml
+    depends_on: [screenshot-stage, scan-stage]
