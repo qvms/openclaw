@@ -1,0 +1,173 @@
+name: screenshot-capture
+kind: module
+desc: Web screenshot and visual analysis workflow with pre_condition checks and exports
+
+params:
+  - name: threads
+    value: "10"
+  - name: timeout_per_page
+    value: "30"
+  - name: viewport_width
+    value: "1920"
+  - name: viewport_height
+    value: "1080"
+
+steps:
+  - name: setup-directories
+    type: bash
+    commands:
+      - mkdir -p {{Output}}/screenshots
+      - mkdir -p {{Output}}/thumbnails
+      - mkdir -p {{Output}}/analysis
+    exports:
+      screenshots_dir: "{{Output}}/screenshots"
+      thumbnails_dir: "{{Output}}/thumbnails"
+      analysis_dir: "{{Output}}/analysis"
+
+  - name: prepare-targets
+    type: function
+    function: |
+      var target = "{{Target}}";
+      var urls = [];
+
+      // Check if target is a file or single URL
+      if (file_exists(target)) {
+        log_info("Target is a file, reading URLs");
+        var content = read_file(target);
+        urls = content.trim().split("\n").filter(function(u) { return u.length > 0; });
+      } else {
+        // Ensure URL has protocol
+        if (!target.starts_with("http")) {
+          target = "https://" + target;
+        }
+        urls = [target];
+        log_info("Single target mode: " + target);
+      }
+
+      log_info("Total URLs to screenshot: " + urls.length);
+      writeFile("{{Output}}/url-list.txt", urls.join("\n"));
+      return urls.length;
+    exports:
+      url_count: "{{Result}}"
+      url_list: "{{Output}}/url-list.txt"
+
+  - name: probe-live-urls
+    type: bash
+    pre_condition: "file_exists('{{url_list}}')"
+    command: "{{Binaries}}/pd-httpx -l {{url_list}} -silent -mc 200,201,301,302,307,401,403 -o {{Output}}/live-urls.txt"
+    timeout: 600
+    on_error:
+    - action: continue
+    exports:
+      live_urls: "{{Output}}/live-urls.txt"
+
+  - name: validate-live-urls
+    type: function
+    pre_condition: "file_exists('{{live_urls}}')"
+    function: |
+      var count = file_length("{{live_urls}}");
+      log_info("Live URLs found: " + count);
+
+      if (count == 0) {
+        log_warn("No live URLs found, screenshots may fail");
+        return false;
+      }
+
+      return count > 0;
+    exports:
+      has_live_urls: "{{Result}}"
+
+  - name: capture-screenshots
+    type: foreach
+    pre_condition: "file_exists('{{live_urls}}') && file_length('{{live_urls}}') > 0"
+    input: "{{live_urls}}"
+    variable: url
+    threads: "{{threads}}"
+    step:
+      name: screenshot-single
+      type: bash
+      command: |
+        filename=$(echo "[[url]]" | md5sum | cut -d' ' -f1)
+        {{Binaries}}/gowitness single --url="[[url]]" --screenshot-path={{screenshots_dir}} --screenshot-filename=${filename}.png --timeout={{timeout_per_page}}
+      timeout: 60
+      on_error:
+      - action: continue
+
+  - name: process-screenshots
+    type: parallel-steps
+    parallel_steps:
+      - name: generate-thumbnails
+        type: bash
+        command: |
+          for img in {{screenshots_dir}}/*.png; do
+            if [ -f "$img" ]; then
+              filename=$(basename "$img" .png)
+              convert "$img" -resize 400x300 {{thumbnails_dir}}/${filename}_thumb.png 2>/dev/null || true
+            fi
+          done
+        timeout: 300
+        on_error:
+        - action: continue
+      - name: extract-metadata
+        type: bash
+        command: |
+          echo "[]" > {{analysis_dir}}/metadata.json
+          for img in {{screenshots_dir}}/*.png; do
+            if [ -f "$img" ]; then
+              size=$(stat -f%z "$img" 2>/dev/null || stat -c%s "$img" 2>/dev/null)
+              echo "{\"file\": \"$(basename $img)\", \"size\": $size}" >> {{analysis_dir}}/metadata.json
+            fi
+          done
+        timeout: 120
+
+  - name: generate-stats
+    type: function
+    function: |
+      var stats = {
+        total_urls: parse_int("{{url_count}}"),
+        live_urls: file_length("{{live_urls}}"),
+        screenshots: 0,
+        thumbnails: 0
+      };
+
+      // Count screenshot files
+      var screenshotDir = "{{screenshots_dir}}";
+      log_info("Screenshot capture statistics:");
+      log_info("  Total URLs: " + stats.total_urls);
+      log_info("  Live URLs: " + stats.live_urls);
+
+      writeFile("{{analysis_dir}}/stats.json", JSON.stringify(stats, null, 2));
+      return JSON.stringify(stats);
+    exports:
+      screenshot_stats: "{{Result}}"
+
+  - name: create-gallery
+    type: bash
+    commands:
+      - |
+        cat > {{Output}}/gallery.html << 'HTMLEOF'
+        <!DOCTYPE html>
+        <html>
+        <head><title>Screenshot Gallery - {{Target}}</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 20px; }
+          .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 20px; }
+          .item { border: 1px solid
+          .item img { max-width: 100%; height: auto; }
+        </style>
+        </head>
+        <body>
+        <h1>Screenshot Gallery</h1>
+        <p>Target: {{Target}}</p>
+        <div class="grid">
+        HTMLEOF
+      - |
+        for img in {{screenshots_dir}}/*.png; do
+          if [ -f "$img" ]; then
+            filename=$(basename "$img")
+            echo "<div class='item'><img src='screenshots/$filename'><p>$filename</p></div>" >> {{Output}}/gallery.html
+          fi
+        done
+        echo "</div></body></html>" >> {{Output}}/gallery.html
+    exports:
+      gallery_html: "{{Output}}/gallery.html"
