@@ -1,0 +1,110 @@
+kind: module
+name: enhanced-enum-subdomain
+description: Comprehensive subdomain enumeration with multi-source passive + optional permutations and active
+tags: subdomain, enumeration, discovery, dns, enhanced
+
+params:
+  - name: subfinderThreads
+    default: "{{threads * 8}}"
+  - name: subfinderConfig
+    default: "{{ExternalConfigs}}/subfinder-provider-config.yaml"
+  - name: enable_amass
+    type: bool
+    default: false
+  - name: enable_permutations
+    type: bool
+    default: false
+  - name: permutation_wordlist
+    default: "{{ExternalData}}/wordlists/dns/subdomains-top1million-5000.txt"
+  - name: enable_all_sources
+    type: bool
+    default: true
+
+dependencies:
+  commands:
+    - subfinder
+    - findomain
+    - assetfinder
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+reports:
+  - name: final-subdomains
+    path: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+    type: text
+    description: Final deduplicated and cleaned subdomain list
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/subdomain/")'
+
+  - name: subfinder-enum
+    type: bash
+    log: "Running subfinder (with -all if enabled)"
+    commands:
+      - |
+        if [ "{{enable_all_sources}}" = "true" ]; then
+          subfinder -d {{Target}} -all -provider-config {{subfinderConfig}} -t {{subfinderThreads}} -o {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt >/dev/null 2>&1
+        else
+          subfinder -d {{Target}} -provider-config {{subfinderConfig}} -t {{subfinderThreads}} -o {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt >/dev/null 2>&1
+        fi
+
+  - name: amass-enum
+    type: bash
+    pre_condition: "{{enable_amass}}"
+    log: "Running amass (passive by default for speed)"
+    commands:
+      - 'amass enum -passive -d {{Target}} -o {{Output}}/subdomain/{{TargetSpace}}-amass.txt >/dev/null 2>&1'
+    on_error:
+      - action: continue
+
+  - name: additional-sources
+    type: function
+    log: "Running assetfinder, findomain, and crt.sh style if available"
+    functions:
+      - 'exec_cmd("findomain -u {{Output}}/subdomain/{{TargetSpace}}-findomain.txt -t {{Target}} > /dev/null 2>&1")'
+      - 'exec_cmd("assetfinder -subs-only {{Target}} > {{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt")'
+      - 'exec_cmd("curl -s \"https://crt.sh/?q=%.{{Target}}&output=json\" | jq -r \".[].name_value\" | sed \"s/\\*\\.//g\" | sort -u > {{Output}}/subdomain/{{TargetSpace}}-crtsh.txt" || true)'
+    on_error:
+      - action: continue
+
+  - name: permutations
+    type: bash
+    pre_condition: "{{enable_permutations}}"
+    log: "Generating permutations (alterx or simple if available)"
+    commands:
+      - |
+        if command -v alterx >/dev/null 2>&1; then
+          cat {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt {{Output}}/subdomain/{{TargetSpace}}-amass.txt 2>/dev/null | alterx -enrich -o {{Output}}/subdomain/{{TargetSpace}}-alterx.txt || true
+        else
+          echo "alterx not found, skipping advanced permutations" > {{Output}}/subdomain/{{TargetSpace}}-alterx.txt
+        fi
+    on_error:
+      - action: continue
+
+  - name: merge-and-clean
+    type: function
+    log: "Merging all sources, cleaning, sorting"
+    functions:
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-subfinder.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-amass.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-findomain.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-crtsh.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-alterx.txt")'
+      - 'clean_sub("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Target}}")'
+      - 'sort_unix("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt")'
+      - 'exec_cmd("rm -f {{Output}}/subdomain/{{TargetSpace}}-*.txt")'
+    on_error:
+      - action: continue
+
+  - name: summary-stats
+    type: function
+    log: "Subdomain enumeration complete"
+    functions:
+      - 'log_info("Final subdomain count: " + file_length("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"))'

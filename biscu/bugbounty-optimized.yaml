@@ -1,0 +1,71 @@
+kind: flow
+name: bugbounty-optimized
+description: Competitive bug bounty reconnaissance - stealth-aware, high-severity focused, high signal-to-noise
+tags: recon, bugbounty, targeted, stealth
+help:
+  example_targets: ['example.com']
+  usage: osmedeus run -f bugbounty-optimized -t example.com
+
+params:
+  - name: enable_permutations
+    default: true
+  - name: enable_amass
+    default: false
+  - name: highOnly
+    default: true
+  - name: nucleiRateLimit
+    default: "30"
+  - name: nucleiSeverity
+    default: "critical,high"
+  - name: enableStoreHTTPResponse
+    default: false
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+modules:
+  - name: enum-subdomain
+    path: enhanced-enum-subdomain.yaml
+    params:
+      enable_amass: "{{enable_amass}}"
+      enable_permutations: "{{enable_permutations}}"
+      enable_all_sources: true
+
+  - name: probe-dns
+    path: common/probe-dns.yaml
+    depends_on:
+      - enum-subdomain
+
+  - name: recon-http-fp
+    path: common/recon-http-fp.yaml
+    depends_on:
+      - probe-dns
+
+  - name: recon-screenshot
+    path: common/recon-screenshot.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: scan-vuln
+    path: enhanced-scan-vuln.yaml
+    depends_on:
+      - recon-http-fp
+    params:
+      highOnly: "{{highOnly}}"
+      nucleiSeverity: "{{nucleiSeverity}}"
+      nucleiRateLimit: "{{nucleiRateLimit}}"
+      extraNuclei: "-rl {{nucleiRateLimit}} -etags dos,intrusive"
+
+  - name: scan-content
+    path: common/scan-content.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: probe-port
+    path: common/probe-port.yaml
+    depends_on:
+      - recon-http-fp
+      - enum-ipspace

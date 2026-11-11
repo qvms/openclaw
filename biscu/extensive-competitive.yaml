@@ -1,0 +1,27 @@
+kind: flow
+name: extensive-competitive
+description: Maximum coverage reconnaissance for high-value targets - full ports, active elements, thorough scanning
+tags: recon, extensive, competitive, thorough
+extends: enhanced-general
+help:
+  usage: osmedeus run -f extensive-competitive -t example.com
+
+params:
+  - name: enable_amass
+    default: true
+  - name: enable_permutations
+    default: true
+  - name: enableDnsBruteFocing
+    default: true
+  - name: highOnly
+    default: false
+  - name: nucleiSeverity
+    default: "critical,high,medium,low"
+  - name: enableStoreHTTPResponse
+    default: true
+
+modules:
+  - name: scan-vuln-thorough
+    path: common/scan-vuln-thorough.yaml
+    depends_on:
+      - recon-http-fp

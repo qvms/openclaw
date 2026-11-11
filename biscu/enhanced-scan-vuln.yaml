@@ -1,0 +1,109 @@
+kind: module
+name: enhanced-scan-vuln
+description: Targeted Nuclei vulnerability hunting with severity control, rate awareness, and richer reporting
+tags: vulnerability, nuclei, security, enhanced
+
+params:
+  - name: httpFile
+    default: "{{Output}}/probing/http-{{TargetSpace}}.txt"
+  - name: nucleiOutputJsonl
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiCleanOutputJsonl
+    default: "{{Output}}/vulnscan/clean-jsonl-{{TargetSpace}}.txt"
+  - name: nucleiMarkdownReport
+    default: "{{Output}}/vulnscan/nuclei-overview-report-{{TargetSpace}}.md"
+  - name: nucleiTemplateConfig
+    default: "~/nuclei-templates/"
+  - name: customTemplates
+    default: ""
+  - name: nucleiThreads
+    default: "{{ threads * 5 }}"
+  - name: nucleiTimeout
+    default: "6h"
+  - name: nucleiSeverity
+    default: "critical,high,medium"
+  - name: nucleiRateLimit
+    default: "50"
+  - name: extraNuclei
+    default: "-rl {{nucleiRateLimit}}"
+  - name: vulnLimit
+    default: "15000"
+  - name: defaultUA
+    default: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+  - name: highOnly
+    type: bool
+    default: false
+
+dependencies:
+  commands:
+    - nuclei
+    - jq
+
+reports:
+  - name: nuclei-raw-json
+    path: "{{nucleiOutputJsonl}}"
+    type: jsonl
+    description: Raw Nuclei findings
+  - name: nuclei-markdown-report
+    path: "{{nucleiMarkdownReport}}"
+    type: markdown
+    description: Filtered Markdown report
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating vulnscan folders"
+    functions:
+      - 'create_folder("{{Output}}/vulnscan")'
+
+  - name: check-input-limit
+    type: function
+    log: "Checking input size"
+    pre_condition: 'file_length("{{httpFile}}") > {{vulnLimit}}'
+    functions:
+      - 'log_warn("Input exceeds {{vulnLimit}} lines, sampling or skipping heavy scan")'
+      - 'skip()'
+
+  - name: adjust-severity
+    type: function
+    log: "Adjusting severity if highOnly"
+    pre_condition: "{{highOnly}}"
+    functions:
+      - 'log_info("Running in high-severity only mode")'
+
+  - name: nuclei-scan
+    type: bash
+    log: "Running enhanced Nuclei scan"
+    pre_condition: 'file_exists("{{httpFile}}")'
+    commands:
+      - |
+        SEVERITY="{{nucleiSeverity}}"
+        if [ "{{highOnly}}" = "true" ]; then
+          SEVERITY="critical,high"
+        fi
+        TEMPLATES="-t {{nucleiTemplateConfig}}"
+        if [ -n "{{customTemplates}}" ]; then
+          TEMPLATES="$TEMPLATES -t {{customTemplates}}"
+        fi
+        timeout -k 1m {{nucleiTimeout}} nuclei -H "User-Agent: {{defaultUA}}" -silent -c {{nucleiThreads}} -jsonl -severity "$SEVERITY" $TEMPLATES -l {{httpFile}} -irr -o {{nucleiOutputJsonl}} {{extraNuclei}} >/dev/null 2>&1
+    on_error:
+      - action: continue
+
+  - name: filter-and-process
+    type: function
+    log: "Filtering and processing results"
+    pre_condition: 'file_length("{{nucleiOutputJsonl}}") > 0'
+    functions:
+      - 'jsonl_filter("{{nucleiOutputJsonl}}", "{{nucleiCleanOutputJsonl}}", "template-id,info.name,info.severity,matched-at,matched-name,host")'
+      - 'sort_unix("{{nucleiCleanOutputJsonl}}")'
+      - 'convert_jsonl_to_markdown("{{nucleiCleanOutputJsonl}}", "{{nucleiMarkdownReport}}")'
+      - 'db_import_vuln_from_file("{{TargetSpace}}", "{{nucleiOutputJsonl}}")'
+      - 'send_telegram_file("{{nucleiMarkdownReport}}", "Enhanced Vulnerability Results - {{Target}}")'
+    on_error:
+      - action: continue
+
+  - name: summary
+    type: function
+    log: "Vuln scan complete"
+    functions:
+      - 'log_info("Findings count: " + file_length("{{nucleiCleanOutputJsonl}}"))'

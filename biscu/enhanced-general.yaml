@@ -1,0 +1,85 @@
+kind: flow
+name: enhanced-general
+description: Upgraded standard domain reconnaissance with enhanced modules, better coverage, and operational controls
+tags: recon, domain, enhanced, standard
+help:
+  example_targets: ['example.com', 'hackerone.com']
+  usage: osmedeus run -f enhanced-general -t example.com -p 'enable_permutations=true,highOnly=false'
+
+params:
+  - name: enableDnsBruteFocing
+    default: true
+  - name: enable_permutations
+    default: false
+  - name: enable_amass
+    default: false
+  - name: enableStoreHTTPResponse
+    default: false
+  - name: highOnly
+    default: false
+  - name: nucleiSeverity
+    default: "critical,high,medium"
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+modules:
+  - name: enum-subdomain
+    path: enhanced-enum-subdomain.yaml
+    params:
+      enable_amass: "{{enable_amass}}"
+      enable_permutations: "{{enable_permutations}}"
+
+  - name: probe-dns
+    path: common/probe-dns.yaml
+    depends_on:
+      - enum-subdomain
+
+  - name: recon-http-fp
+    path: common/recon-http-fp.yaml
+    depends_on:
+      - probe-dns
+    params:
+      enableStoreHTTPResponse: "{{enableStoreHTTPResponse}}"
+
+  - name: recon-screenshot
+    path: common/recon-screenshot.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: recon-spider
+    path: common/recon-spider.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: util-archive
+    path: common/util-archive.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: enum-ipspace
+    path: common/enum-ipspace.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: scan-vuln
+    path: enhanced-scan-vuln.yaml
+    depends_on:
+      - recon-http-fp
+    params:
+      highOnly: "{{highOnly}}"
+      nucleiSeverity: "{{nucleiSeverity}}"
+
+  - name: probe-port
+    path: common/probe-port.yaml
+    depends_on:
+      - recon-http-fp
+      - enum-ipspace
+
+  - name: scan-content
+    path: common/scan-content.yaml
+    depends_on:
+      - recon-http-fp
