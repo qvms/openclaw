@@ -1,0 +1,156 @@
+kind: module
+name: graphql-scan
+description: Test GraphQL endpoints and scan for introspection, batching attacks, and common vulnerabilities
+tags: graphql, vulnerability, nuclei, vigolium
+
+params:
+  - name: vigoliumTimeout
+    default: "1h"
+  - name: vigoliumScanningMaxDuration
+    default: "45m"
+  - name: vigoliumParallel
+    default: "2"
+  - name: vigoliumConcurrency
+    default: "{{ threads * 5 }}"
+  - name: vigoliumMaxPerHost
+    default: "30"
+  - name: vigoliumStrategy
+    default: "deep"
+  - name: vigoliumSkipPhases
+    default: "known-issue-scan"
+  - name: extraVigoliumScan
+    default: " "
+
+  - name: vigoliumDefaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+  - name: vigoliumVulnDBDir
+    default: "{{Output}}/vulnscan/vigolium-dbs"
+  - name: vigoliumVulnDBFile
+    default: "{{Output}}/vulnscan/vigolium-dbs/vgnm-vuln-{{TargetSpace}}.sqlite"
+
+  - name: vigoliumVulnHTMLReport
+    default: "{{Output}}/vulnscan/vigolium-findings-{{TargetSpace}}.html"
+  - name: vigoliumVulnJsonlFile
+    default: "{{Output}}/vulnscan/vigolium-output-{{TargetSpace}}.jsonl"
+  - name: vigoliumVulnNormalizedJsonlFile
+    default: "{{Output}}/vulnscan/vigolium-findings-normalized-{{TargetSpace}}.jsonl"
+  - name: vigoliumVulnCleanJsonlFile
+    default: "{{Output}}/vulnscan/vigolium-findings-clean-{{TargetSpace}}.jsonl"
+  - name: vigoliumVulnMarkdownReport
+    default: "{{Output}}/vulnscan/vigolium-findings-{{TargetSpace}}.md"
+
+dependencies:
+  commands:
+    - vigolium
+    - jq
+
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: vigolium-vuln-html-report
+    path: "{{vigoliumVulnHTMLReport}}"
+    type: html
+    description: Vigolium thorough vulnerability scan HTML report
+
+  - name: vigolium-vuln-jsonl
+    path: "{{vigoliumVulnJsonlFile}}"
+    type: jsonl
+    description: Vigolium thorough full database JSONL export
+
+  - name: vigolium-vuln-markdown-report
+    path: "{{vigoliumVulnMarkdownReport}}"
+    type: md
+    description: Vigolium thorough vulnerability findings Markdown report
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating Vigolium vulnscan output folders"
+    functions:
+      - 'create_folder("{{Output}}/graphql")'
+      - 'create_folder("{{vigoliumVulnDBDir}}")'
+
+  - name: graphql-api
+    type: parallel-steps
+    parallel_steps:
+      - name: run-nuclei
+        type: bash
+        command: '{{Binaries}}/nuclei -u "{{Target}}" -t http/technologies/graphql/ -jle "{{Output}}/graphql-tech.jsonl"'
+        timeout: 60000
+        on_error:
+          - action: log
+            message: "Nuclei touch failed, continuing with different approach"
+          - action: run
+            step: targeted-nuclei
+
+      - name: run-vigolium
+        type: bash
+        command: 'timeout -k 1m {{vigoliumTimeout}} vigolium scan -t "{{Target}}" -m graphql-fingerprint, graphql-introspection-detect, graphql-scan --db-isolate --soft-fail -H \"{{vigoliumDefaultUA}}\" --scanning-max-duration {{vigoliumScanningMaxDuration}} --omit-response --db {{vigoliumVulnDBFile}} --skip {{vigoliumSkipPhases}} --strategy {{vigoliumStrategy}} --concurrency {{vigoliumConcurrency}} --max-per-host {{vigoliumMaxPerHost}}'
+        on_error:
+          - action: log
+            message: "Vigolium failed moving on"
+
+  - name: targeted-nuclei
+    type: bash
+    pre_condition: 'file_exists("{{Output}}/graphql-tech.jsonl")'
+    command: '{{Binaries}}/nuclei -u "{{Target}}" -t http/misconfiguration/graphql/ -jle "{{Output}}/graphql-cop-fallback.jsonl"'
+    on_error:
+        - action: continue
+
+  - name: generate-vigolium-vuln-reports
+    type: bash
+    log: "Generate Vigolium vulnerability reports from the shared db"
+    pre_condition: 'file_exists("{{vigoliumVulnDBFile}}")'
+    commands:
+      - "vigolium export --silent --db {{vigoliumVulnDBFile}} --only findings --omit-response --format html -o {{vigoliumVulnHTMLReport}}"
+      - "vigolium export --silent --db {{vigoliumVulnDBFile}} --omit-response --format jsonl -o {{vigoliumVulnJsonlFile}}"
+    on_error:
+        - action: continue
+
+  - name: normalize-vigolium-vuln-findings
+    type: bash
+    log: "Normalizing Vigolium vulnerability findings"
+    pre_condition: 'file_length("{{vigoliumVulnJsonlFile}}") > 0'
+    commands:
+      - "jq -c '(.data? // .) as $d | select((.type? // \"finding\") == \"finding\") | {module_id: $d.module_id, module_name: $d.module_name, severity: $d.severity, confidence: $d.confidence, hostname: $d.hostname, url: $d.url, matched_at: (($d.matched_at // [$d.url]) | if type == \"array\" then .[0] else . end), extracted_results: $d.extracted_results} | with_entries(select(.value != null and .value != [] and .value != \"\"))' {{vigoliumVulnJsonlFile}} >> {{vigoliumVulnNormalizedJsonlFile}}"
+    on_error:
+        - action: continue
+
+  - name: vigolium-vuln-report-processing
+    type: function
+    log: "Processing Vigolium vulnerability report"
+    pre_condition: 'file_length("{{vigoliumVulnNormalizedJsonlFile}}") > 0'
+    functions:
+      - jsonl_filter("{{vigoliumVulnNormalizedJsonlFile}}", "{{vigoliumVulnCleanJsonlFile}}", "module_id,module_name,severity,confidence,hostname,url,matched_at,extracted_results")
+      - sort_unix("{{vigoliumVulnCleanJsonlFile}}")
+
+  - name: generate-vigolium-vuln-md-report
+    type: function
+    log: "Generating Vigolium vulnerability markdown report"
+    pre_condition: 'file_length("{{vigoliumVulnCleanJsonlFile}}") > 0'
+    functions:
+      - 'convert_jsonl_to_markdown("{{vigoliumVulnCleanJsonlFile}}", "{{vigoliumVulnMarkdownReport}}")'
+      - 'send_telegram_file("{{vigoliumVulnMarkdownReport}}", "Vigolium Thorough Vulnerability Scan Results")'
+    on_error:
+        - action: continue
+
+  - name: count-vigolium-vulnerabilities
+    type: function
+    log: "Counting Vigolium vulnerability findings"
+    pre_condition: 'file_length("{{vigoliumVulnCleanJsonlFile}}") > 0'
+    functions:
+      - db_total_vulns("{{vigoliumVulnCleanJsonlFile}}")
+
+  - name: process-vigolium-vulnerability-in-db
+    type: function
+    log: "Processing Vigolium vulnerability results in db"
+    pre_condition: 'file_length("{{vigoliumVulnJsonlFile}}") > 0'
+    functions:
+      - 'db_import_vigolium("{{TargetSpace}}", "{{vigoliumVulnJsonlFile}}")'
+      - 'send_telegram_file("{{vigoliumVulnHTMLReport}}", "Vigolium Thorough Vulnerability HTML Report")'
+    on_error:
+      - action: continue

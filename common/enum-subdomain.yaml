@@ -1,0 +1,78 @@
+kind: module
+name: enum-subdomain
+description: Enumerate subdomains via subfinder, amass, assetfinder, and findomain (sources concurrent)
+tags: subdomain, enumeration, discovery, dns
+
+params:
+  - name: subfinderThreads
+    default: "{{threads * 6}}"
+  - name: subfinderConfig
+    default: "{{ExternalConfigs}}/subfinder-provider-config.yaml"
+  - name: enable_amass
+    type: bool
+    default: true
+
+dependencies:
+  commands:
+    - subfinder
+    - findomain
+    - amass
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: final-subdomains
+    path: "{{Output}}/subdomain/final-{{TargetSpace}}.txt"
+    type: text
+    description: Final list of subdomains
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/subdomain/")'
+
+  - name: parallel-enum-sources
+    type: bash
+    log: "Running subdomain sources in parallel (subfinder/amass/assetfinder/findomain)"
+    command: |
+      set +e
+      OUT="{{Output}}/subdomain"
+      T="{{Target}}"
+      TS="{{TargetSpace}}"
+      subfinder -d "$T" -provider-config "{{subfinderConfig}}" -t {{subfinderThreads}} -o "$OUT/${TS}-subfinder.txt" >/dev/null 2>&1 &
+      SF=$!
+      findomain -u "$OUT/${TS}-findomain.txt" -t "$T" >/dev/null 2>&1 &
+      FD=$!
+      assetfinder -subs-only "$T" >> "$OUT/${TS}-assetfinder.txt" 2>/dev/null &
+      AF=$!
+      AM=""
+      if [ "{{enable_amass}}" = "true" ] || [ "{{enable_amass}}" = "True" ] || [ "{{enable_amass}}" = "1" ]; then
+        amass enum -active -d "$T" -oA "$OUT/${TS}-amass.txt" >/dev/null 2>&1 &
+        AM=$!
+      fi
+      wait $SF; wait $FD; wait $AF
+      [ -n "$AM" ] && wait $AM
+      true
+
+  - name: merge-subdomains
+    type: function
+    log: "Merging subdomain sources"
+    functions:
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-subfinder.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-amass.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt")'
+      - 'append_file("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Output}}/subdomain/{{TargetSpace}}-findomain.txt")'
+      - 'exec_cmd("rm -rf {{Output}}/subdomain/{{TargetSpace}}-*.txt")'
+    on_error:
+      - action: continue
+
+  - name: subdomain-sort
+    type: function
+    log: "Sorting final subdomain list"
+    functions:
+      - 'clean_sub("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt", "{{Target}}")'
+      - 'sort_unix("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt")'

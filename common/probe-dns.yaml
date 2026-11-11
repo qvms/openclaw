@@ -1,0 +1,181 @@
+kind: module
+name: probe-dns
+description: Resolve DNS records, bruteforce subdomains, and probe HTTP endpoints
+tags: dns, probing, http, resolution
+
+params:
+  - name: finalSubdomainFile
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt"
+  - name: httpxFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+  - name: rawDnsFile
+    default: "{{Output}}/probing/raw-{{TargetSpace}}.txt"
+  - name: dnsJsonFile
+    default: "{{Output}}/probing/dns-json-{{TargetSpace}}.txt"
+  - name: dnsFile
+    default: "{{Output}}/probing/dns-{{TargetSpace}}.txt"
+
+  - name: permWordlists
+    default: "{{ExternalData}}/wordlists/dns/altdns.txt"
+  - name: permDomainFile
+    default: "{{Output}}/probing/permutation-{{TargetSpace}}.txt"
+  - name: customDnsWordlist
+    default: "{{ExternalData}}/wordlists/dns/small.txt"
+  - name: dnsBruteForceWordlist
+    default: "{{ExternalData}}/wordlists/dns/small.txt"
+  - name: resolvers
+    default: "{{ExternalData}}/mics/resolvers.txt"
+  - name: trustedResolvers
+    default: "{{ExternalData}}/mics/trusted-resolvers.txt"
+
+  - name: enablePermutation
+    type: bool
+    default: "false"
+
+  - name: enableDnsBruteFocing
+    type: bool
+    default: "false"
+
+  - name: massdnsRateBrute
+    default: "{{ threads * 50 }}"
+  - name: dnsThreads
+    default: "{{ threads * 25 }}"
+  - name: permLimit
+    default: "8000"
+  - name: wildcardLimit
+    default: "100000"
+  - name: wildcardTests
+    default: "{{ threads * 3 }}"
+  - name: httpxThreads
+    default: "{{ threads * 8 }}"
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+reports:
+  - name: dns-results
+    path: "{{dnsFile}}"
+    type: text
+    description: DNS resolution results
+
+  - name: http-results
+    path: "{{httpxFile}}"
+    type: text
+    description: HTTP probing results
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/probing")'
+      - 'create_folder("{{Output}}/ipspace")'
+
+  - name: resolve-dns
+    type: bash
+    log: "Resolving DNS with dnsx"
+    pre_condition: 'file_exists("{{finalSubdomainFile}}")'
+    commands:
+      - 'dnsx -silent -json -l {{finalSubdomainFile}} -a -cname -resp -silent -r {{resolvers}} -t {{dnsThreads}} | grep "NOERROR" >> {{dnsJsonFile}}'
+      - "cat {{dnsJsonFile}} | jq -r '(.host) as $h | (.a // [])[] | \"\\($h) A \\(.)\"' >> {{dnsFile}}"
+      - "cat {{dnsJsonFile}} | jq -r '(.host) as $h | (.cname // [])[] | \"\\($h) CNAME \\(.)\"' >> {{dnsFile}}"
+      - 'cat {{dnsFile}} | awk "{print $1}" | sort -u > {{Output}}/probing/nonwild-{{TargetSpace}}.txt'
+
+  - name: dns-bruteforce
+    type: bash
+    log: "Running DNS bruteforce with dnsx"
+    pre_condition: "{{enableDnsBruteFocing}} && !{{TargetIsWildcard}}"
+    commands:
+      - "dnsx -silent -json -auto-wildcard -d {{Target}} -w {{dnsBruteForceWordlist}} -a -resp -silent -r {{resolvers}} -t {{dnsThreads*2}} -o {{Output}}/probing/subbrute-{{TargetSpace}}.txt"
+    on_error:
+      - action: continue
+
+  - name: generate-permutations
+    type: function
+    log: "Generating permutation subdomains"
+    pre_condition: 'file_length("{{finalSubdomainFile}}") <= {{permLimit}} && {{enablePermutation}} && {{enableDnsBruteFocing}} && !{{TargetIsWildcard}}'
+    functions:
+      - 'printf("Generating permutation subdomains wordlists which might create a very big file")'
+      - exec_cmd("cat {{finalSubdomainFile}} | alterx -silent  >> {{permDomainFile}}")
+      - 'sort_unix("{{permDomainFile}}")'
+      - 'exec_cmd("puredns resolve {{permDomainFile}} {{Target}} -r {{resolvers}} --wildcard-tests {{wildcardTests}} -w {{Output}}/probing/permutations-{{TargetSpace}}.txt --resolvers-trusted {{trustedResolvers}} --rate-limit-trusted {{massdnsRateBrute}} >/dev/null 2>&1" )'
+      - 'exec_cmd("rm -rf {{permDomainFile}}")'
+    on_error:
+      - action: continue
+
+  - name: merge-existing-dns
+    type: function
+    log: "Merging existing dns"
+    pre_condition: 'file_length("{{Output}}/probing/permutations-{{TargetSpace}}.txt") > 0 && file_length("{{Output}}/probing/subbrute-{{TargetSpace}}.txt") > 0'
+    functions:
+      - 'exec_cmd("cat {{Output}}/probing/subbrute-{{TargetSpace}}.txt {{Output}}/probing/permutations-{{TargetSpace}}.txt  >> {{dnsFile}}")'
+      - 'exec_cmd("{{dnsFile}}")'
+
+  - name: clean-dnsx-results
+    type: bash
+    log: "Cleaning dnsx results"
+    pre_condition: 'file_exists("{{Output}}/probing/raw-dnsx-{{TargetSpace}}.txt") && file_length("{{dnsFile}}") < 1'
+    commands:
+      - "cat {{Output}}/probing/raw-dnsx-{{TargetSpace}}.txt | jq -r '(.host) as $h | (.a // [])[] | \"\\($h) A \\(.)\"' >> {{dnsFile}}"
+      - "cat {{Output}}/probing/raw-dnsx-{{TargetSpace}}.txt | jq -r '(.host) as $h | (.cname // [])[] | \"\\($h) CNAME \\(.)\"' >> {{dnsFile}}"
+    on_error:
+      - action: continue
+
+  - name: http-probe
+    type: bash
+    log: "Probing HTTP endpoints"
+    commands:
+      - 'cat {{dnsFile}} | awk -F ". " "{print $1}" | sort -u > {{httpxFile}}-tmp'
+      - 'cat {{httpxFile}}-tmp {{finalSubdomainFile}} | sort -u | pd-httpx -H "{{defaultUA}}" -silent -t {{httpxThreads}} >> {{httpxFile}}'
+      - "rm -rf {{httpxFile}}-tmp"
+    on_error:
+      - action: continue
+
+  - name: fallback-http-probe
+    type: bash
+    log: "As a fallback, use the http probe in case the binary folder is corrupted"
+    pre_condition: 'file_length("{{httpxFile}}") < 1'
+    commands:
+      - 'cat {{dnsFile}} | awk -F ". " "{print $1}" | sort -u > {{httpxFile}}-tmp'
+      - 'cat {{httpxFile}}-tmp {{finalSubdomainFile}} | sort -u | pd-httpx -H "{{defaultUA}}" -silent -t {{httpxThreads}} >> {{httpxFile}}'
+      - "rm -rf {{httpxFile}}-tmp"
+    on_error:
+      - action: continue
+
+  - name: cleanup-and-sort-http
+    type: function
+    log: "Cleaning up and sorting HTTP results"
+    functions:
+      - sort_unix("{{httpxFile}}")
+      - sort_unix("{{dnsFile}}")
+      - exec_cmd("rm -rf {{rawDnsFile}} {{permDomainFile}}")
+    on_error:
+      - action: continue
+
+  - name: filter-wildcard-http
+    type: function
+    log: "Filtering wildcard HTTP results in case it is too big"
+    pre_condition: 'file_exists("{{httpxFile}}") && file_length("{{httpxFile}}") > {{wildcardLimit}}'
+    functions:
+      - 'log_warn("HTTP File {{httpxFile}} is too big and excess the limit {{wildcardLimit}}. Filtering it...")'
+      - 'exec_cmd("rm -rf {{httpxFile}}")'
+      - 'exec_cmd("cat {{dnsFile}} | grep ''{{Target}}'' | awk ''{print $1}'' | sed ''s/\\.$//g'' | sort -u | pd-httpx -H "{{defaultUA}}" -silent -t {{httpxThreads}} >> {{httpxFile}}")'
+    on_error:
+      - action: continue
+
+  - name: extract-ip-addresses
+    type: function
+    log: "Extracting IP addresses from DNS results"
+    pre_condition: 'file_exists("{{dnsJsonFile}}")'
+    functions:
+      - exec_cmd("cat {{dnsJsonFile}} | jq -r '(.a // [])[]' | sort -u >> {{Output}}/ipspace/{{TargetSpace}}-ip.txt")
+      - sort_unix("{{Output}}/ipspace/{{TargetSpace}}-ip.txt")
+    on_error:
+      - action: continue
+
+  - name: probing-summary
+    type: function
+    log: "Generating probing summary"
+    pre_condition: 'file_exists("{{httpxFile}}")'
+    functions:
+      - 'db_total_subdomains("{{dnsFile}}")'
+      - 'db_total_assets("{{dnsFile}}")'
