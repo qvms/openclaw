@@ -1,0 +1,86 @@
+kind: module
+name: enrichment
+description: Safely enrich and ingest workspace data into Osmedeus DB
+tags: results, assets, subdomains, database
+
+params:
+  - name: archiveJsonFile
+    default: "{{Output}}/archive/archive-{{TargetSpace}}.jsonl"
+
+  - name: archiveUrlFile
+    default: "{{Output}}/archive/archive-urls-{{TargetSpace}}.txt"
+
+  - name: archiveInterestingUrlFile
+    default: "{{Output}}/archive/archive-interesting-urls-{{TargetSpace}}.txt"
+
+  - name: httpArchiveJsonFile
+    default: "{{Output}}/archive/archive-http-{{TargetSpace}}.jsonl"
+
+  - name: httpArchiveCleanJsonFile
+    default: "{{Output}}/archive/archive-clean-http-{{TargetSpace}}.jsonl"
+
+  - name: httpArchiveCleanMarkdownFile
+    default: "{{Output}}/archive/archive-http-{{TargetSpace}}.md"
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+reports:
+  - name: archive-urls
+    path: "{{archiveUrlFile}}"
+    type: text
+    description: List of discovered archive URLs
+
+  - name: interesting-urls
+    path: "{{archiveInterestingUrlFile}}"
+    type: text
+    description: Interesting URLs from archive discovery
+
+  - name: http-archive-overview
+    path: "{{httpArchiveCleanMarkdownFile}}"
+    type: markdown
+    description: Markdown HTTP archive overview
+
+steps:
+  - name: check-workspace-directory
+    type: function
+    pre_condition: 'is_dir("{{Output}}")'
+    function: 'log_info("Found workspace directory: {{Output}} - beginning ingestion.")'
+
+  - name: import-subdomains
+    type: function
+    pre_condition: 'file_exists("{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt") || file_exists("{{Output}}/subdomain/all-{{TargetSpace}}.txt")'
+    function: |
+      log_info("Ingesting discovered subdomains into database...");
+      let targetFile = file_exists("{{Output}}/subdomain/final-{{TargetSpace}}.txt") ? "{{Output}}/subdomain/final-{{TargetSpace}}.txt" : "{{Output}}/subdomain/all-{{TargetSpace}}.txt";
+      db_partial_import_asset_file("{{Output}}", "domain", targetFile);
+
+  - name: import-live-hosts-and-urls
+    type: function
+    pre_condition: 'file_exists("{{Output}}/probing/httpx-{{TargetSpace}}.json") || file_exists("{{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt")'
+    function: |
+      log_info("Ingesting live HTTP probes and asset endpoints...");
+      if (file_exists("{{Output}}/probing/httpx-{{TargetSpace}}.json")) {
+          db_import_asset_from_file("{{Output}}", "{{Output}}/probing/httpx-{{TargetSpace}}.json");
+      }
+      if (file_exists("{{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt")) {
+          db_partial_import_asset_file("{{Output}}", "url", "{{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt");
+      }
+
+  - name: import-screenshots
+    type: function
+    pre_condition: 'file_exists("{{Output}}/screenshots/httpx-screenshots-{{TargetSpace}}.jsonl")'
+    function: |
+      log_info("Importing screenshot metadata to assets...");
+      db_import_asset_from_file("{{Output}}", "{{Output}}/screenshots/httpx-screenshots-{{TargetSpace}}.jsonl");
+
+  - name: import-vulnerabilities
+    type: function
+    pre_condition: 'file_exists("{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt") || file_exists("{{Output}}/web-recon/vulnerabilities-{{TargetSpace}}.json")'
+    function: |
+      log_info("Importing vulnerability JSON/JSONL findings into database...");
+      let vulnFile = file_exists("{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt") ? "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt" : "{{Output}}/web-recon/vulnerabilities-{{TargetSpace}}.json";
+      db_import_vuln_from_file("{{Output}}", vulnFile);

@@ -1,0 +1,19 @@
+      - name: capture-screenshots
+        type: bash
+        pre_condition: '"{{enableScreenshots}}" == "true" && parse_int("{{live_host_count}}") > 0'
+        step_runner: docker
+        step_runner_config:
+          image: projectdiscovery/katana:latest
+          volumes:
+            - "{{Output}}/web-recon:/output"
+          workdir: /output
+          env:
+            TARGETS_FILE: "/output/probing/httpx-{{TargetSpace}}.txt"
+        command: |
+          echo "Capturing screenshots for live hosts..."
+          cat $TARGETS_FILE | head -20
+        timeout: 1800
+        on_error:
+          - action: log
+            message: "Screenshot capture failed"
+          - action: continue

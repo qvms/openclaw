@@ -1,0 +1,17 @@
+kind: flow
+name: nuke
+description: Single URL analysis - fingerprint, spider, scan, and discover
+tags: recon, url, standard
+help:
+  example_targets: ['https://example.com', 'https://httpbin.org', 'example.com']
+  usage: osmedeus run -f nuke -t https://example.com
+
+dependencies:
+  variables:
+    - name: Target
+      type: url,domain
+      required: true
+
+modules:
+  - name: do-recon-http-fp
+    path: fragments/do-recon-http-fp.yaml

@@ -1,0 +1,29 @@
+kind: module
+name: demo-docker
+description: Demo Docker runner with remote-bash
+steps:
+  - name: nuclei-scan
+    type: remote-bash
+    pre_condition: '"{{enableNuclei}}" == "true" && parse_int("{{live_host_count}}") > 0'
+    step_runner: docker
+    step_runner_config:
+      image: projectdiscovery/nuclei:latest
+      volumes:
+        - "{{Output}}/web-recon:/output"
+      workdir: /output
+      env:
+        SEVERITY: "{{nucleiSeverity}}"
+        THREADS: "{{nucleiThreads}}"
+    command: |
+      nuclei -l /output/probing/httpx-{{TargetSpace}}.txt \
+        -severity $SEVERITY \
+        -c $THREADS \
+        -json-export /output/nuclei/results-{{TargetSpace}}.json \
+        -silent
+    timeout: 3600
+    exports:
+      nuclei_results: "{{Output}}/web-recon/nuclei/results-{{TargetSpace}}.json"
+    on_error:
+      - action: log
+        message: "Nuclei scan failed"
+      - action: continue

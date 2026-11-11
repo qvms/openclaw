@@ -1,0 +1,50 @@
+kind: module
+name: microiis
+description: Scan IIS instances, check for WebDAV enablement, short name enumeration
+tags: iis, windows, web-server, misconfig
+
+params:
+  - name: target
+    required: true
+    description: Target URL or IP hosting IIS
+  - name: output
+    required: false
+    default: "{{Output}}/tech/iis"
+    description: Directory to store scan artifacts
+
+steps:
+  - name: create-output-dir
+    type: bash
+    command: "mkdir -p {{params.output}}"
+
+  - name: iis-fingerprint-and-webdav
+    type: bash
+    command: |
+      curl -s -I -X OPTIONS "{{params.target}}" > "{{params.output}}/options.txt"
+
+      nuclei -u "{{params.target}}" \
+        -tags iis,windows,webdav \
+        -json -o "{{params.output}}/iis-nuclei.json"
+
+  - name: shortname-scanner
+    type: bash
+    depends_on:
+      - iis-fingerprint-and-webdav
+    command: |
+      if command -v iis-shortname-scanner &> /dev/null; then
+          java -jar /opt/iis-shortname-scanner/iis-shortname-scanner.jar "{{params.target}}" > "{{params.output}}/shortname.txt" || true
+      else
+          nuclei -u "{{params.target}}" \
+            -t http/vulnerabilities/iis/iis-shortname.yaml \
+            -json -o "{{params.output}}/iis-shortname-nuclei.json" || true
+      fi
+
+  - name: iis-cve-checks
+    type: bash
+    depends_on:
+      - shortname-scanner
+    command: |
+      nuclei -u "{{params.target}}" \
+        -t http/cves/ \
+        -query "iis" \
+        -json -o "{{params.output}}/iis-cves.json" || true

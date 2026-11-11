@@ -1,0 +1,68 @@
+kind: flow
+name: general
+description: Standard recon - subdomains, fingerprints, vulns, and more
+tags: recon, domain, standard
+help:
+  example_targets: ['example.com', 'hackerone.com']
+  usage: osmedeus run -f general -t example.com
+
+params:
+  - name: enableDnsBruteFocing
+    default: "false"
+  - name: enableStoreHTTPResponse
+    default: "true"
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+modules:
+  - name: enum-subdomain
+    path: common/enum-subdomain.yaml
+
+  - name: probe-dns
+    path: common/probe-dns.yaml
+    depends_on:
+      - enum-subdomain
+
+  - name: recon-http-fp
+    path: common/recon-http-fp.yaml
+    depends_on:
+      - probe-dns
+
+  - name: recon-screenshot
+    path: common/recon-screenshot.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: recon-spider
+    path: common/recon-spider.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: util-archive
+    path: common/util-archive.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: enum-ipspace
+    path: common/enum-ipspace.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: scan-vuln
+    path: common/scan-vuln.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: probe-port
+    path: common/probe-port.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: scan-content
+    path: common/scan-content.yaml
+    depends_on:
+      - recon-http-fp

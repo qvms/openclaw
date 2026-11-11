@@ -1,0 +1,34 @@
+kind: flow
+name: fast
+description: Fast recon - subdomain discovery and HTTP fingerprinting only
+tags: recon, domain, lite
+help:
+  example_targets: ['example.com', 'hackerone.com']
+  usage: osmedeus run -f domain-lite -t example.com
+
+params:
+  - name: enableDnsBruteFocing
+    default: "false"
+
+  - name: enableStoreHTTPResponse
+    default: "true"
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+modules:
+  - name: enum-subdomain-nomass
+    path: common/enum-subdomain-nomass.yaml
+
+  - name: probe-dns
+    path: common/probe-dns.yaml
+    on_error:
+      - action: continue
+
+  - name: recon-http-fp
+    path: common/recon-http-fp.yaml
+    depends_on:
+      - probe-dns
