@@ -1,0 +1,49 @@
+kind: module
+name: graphql
+description: Discover GraphQL endpoints and scan for introspection, batching attacks, and common vulnerabilities.
+tags: graphql, web, vuln-scan
+
+params:
+  - name: target
+    required: true
+    description: Target URL or domain to scan.
+  - name: output
+    required: false
+    default: "{{Output}}/graphql"
+    description: Directory to store scan artifacts.
+
+steps:
+  - name: create-output-dir
+    type: bash
+    command: "mkdir -p {{params.output}}"
+
+  - name: graphql-endpoint-discovery
+    type: bash
+    command: |
+      nuclei -u "{{params.target}}" \
+        -t http/exposures/apis/graphql-path.yaml \
+        -json -o "{{params.output}}/graphql-endpoints.json"
+
+  - name: introspection-and-inql
+    type: bash
+    depends_on:
+      - graphql-endpoint-discovery
+    command: |
+      if command -v inql &> /dev/null; then
+          inql -t "{{params.target}}" --no-color -o "{{params.output}}/inql-output" || true
+      else
+          echo "InQL tool not found, skipping deep schema generation."
+      fi
+
+  - name: graphql-cop-scan
+    type: bash
+    depends_on:
+      - introspection-and-inql
+    command: |
+      if command -v graphql-cop &> /dev/null; then
+          python3 -m graphql_cop -u "{{params.target}}" -o "{{params.output}}/graphql-cop.json" || true
+      else
+          nuclei -u "{{params.target}}" \
+            -t http/vulnerabilities/generic/graphql-introspection.yaml \
+            -json -o "{{params.output}}/graphql-cop-fallback.json"
+      fi

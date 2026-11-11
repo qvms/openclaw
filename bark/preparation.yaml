@@ -1,0 +1,166 @@
+name: preparation
+kind: module
+description: Comprehensive web reconnaissance module
+tags: subdomain
+
+params:
+  - name: threads
+    default: "12"
+  - name: subfinderThreads
+    default: "{{threads * 4}}"
+  - name: httpxThreads
+    default: "{{threads * 2}}"
+  - name: httpxTimeout
+    default: "1000"
+  - name: screenshotThreads
+    default: "{{ threads / 2 }}"
+  - name: subfinderConfig
+    default: "{{ExternalConfigs}}/subfinder-provider-config.yaml"
+  - name: httpxProbeJsonFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.json"
+  - name: httpxFile
+    default: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+  - name: vigoliumTimeout
+    default: "1h"
+  - name: vigoliumScanningMaxDuration
+    default: "45m"
+  - name: vigoliumParallel
+    default: "4"
+  - name: vigoliumConcurrency
+    default: "{{ threads * 6 }}"
+  - name: vigoliumMaxPerHost
+    default: "40"
+  - name: vigoliumStrategy
+    default: "deep"
+  - name: extraVigoliumScan
+    default: " "
+  - name: vigoliumVulnDBDir
+    default: "{{Output}}/vulnscan/vigolium-dbs"
+  - name: vigoliumVulnDBFile
+    default: "{{Output}}/vulnscan/vigolium-dbs/vgnm-vuln-{{TargetSpace}}.sqlite"
+
+  - name: vigoliumVulnHTMLReport
+    default: "{{Output}}/vulnscan/vigolium-findings-{{TargetSpace}}.html"
+  - name: vigoliumVulnJsonlFile
+    default: "{{Output}}/vulnscan/vigolium-output-{{TargetSpace}}.jsonl"
+  - name: vigoliumVulnNormalizedJsonlFile
+    default: "{{Output}}/vulnscan/vigolium-findings-normalized-{{TargetSpace}}.jsonl"
+  - name: vigoliumVulnCleanJsonlFile
+    default: "{{Output}}/vulnscan/vigolium-findings-clean-{{TargetSpace}}.jsonl"
+  - name: vigoliumVulnMarkdownReport
+    default: "{{Output}}/vulnscan/vigolium-findings-{{TargetSpace}}.md"
+
+  - name: vigoliumDefaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+steps:
+  - name: validate-dependencies
+    type: function
+    function: |
+      file_exists("{{Binaries}}/subfinder") &&
+      file_exists("{{Binaries}}/assetfinder") &&
+      file_exists("{{Binaries}}/pd-httpx")&&
+      file_exists("{{Binaries}}/vigolium") &&
+      file_exists("{{Binaries}}/nuclei")
+    exports:
+      deps_valid: "output"
+    on_error:
+      - action: log
+        message: "Required binaries not found"
+      - action: abort
+
+  - name: create-output-folders
+    type: function
+    log: "Creating output folders"
+    functions:
+      - 'create_folder("{{Output}}/subdomain")'
+      - 'create_folder("{{Output}}/probing")'
+      - 'create_folder("{{Output}}/ipspace")'
+      - 'create_folder("{{Output}}/fingerprint")'
+      - 'create_folder("{{Output}}/screenshots")'
+      - 'create_folder("{{Output}}/web-recon")'
+      - 'create_folder("{{Output}}/graphql")'
+      - 'create_folder("{{vigoliumVulnDBDir}}")'
+
+  - name: subdomain-enumeration
+    type: parallel-steps
+    parallel_steps:
+      - name: run-subfinder
+        type: bash
+        command: "{{Binaries}}/subfinder -d {{Target}} -provider-config {{subfinderConfig}} -t {{subfinderThreads}} -o {{Output}}/subdomain/{{TargetSpace}}-subfinder.txt -silent"
+        timeout: 60000
+        on_error:
+          - action: log
+            message: "Subfinder failed, continuing with other tools"
+          - action: continue
+
+      - name: run-assetfinder
+        type: bash
+        command: "{{Binaries}}/assetfinder -subs-only {{Target}} > {{Output}}/subdomain/{{TargetSpace}}-assetfinder.txt"
+        timeout: 3000
+        on_error:
+          - action: continue
+
+      - name: run-findomain
+        type: bash
+        command: "{{Binaries}}/findomain -u {{Output}}/subdomain/{{TargetSpace}}-findomain.txt -t {{Target}} 2>/dev/null"
+        timeout: 3000
+        on_error:
+          - action: continue
+
+  - name: merge-subdomains
+    type: bash
+    commands:
+      - "cat {{Output}}/subdomain/{{TargetSpace}}-*.txt 2>/dev/null | sort -u > {{Output}}/subdomain/all-{{TargetSpace}}.txt"
+      - "cat {{Output}}/subdomain/all-{{TargetSpace}}.txt | {{Binaries}}/cleansub -t '{{Target}}' > {{Output}}/subdomain/final-{{TargetSpace}}.txt 2>/dev/null || cp {{Output}}/subdomain/all-{{TargetSpace}}.txt {{Output}}/subdomain/final-{{TargetSpace}}.txt"
+    exports:
+      finalSubdomainFile: "{{Output}}/subdomain/final-{{TargetSpace}}.txt"
+
+  - name: count-subdomains
+    type: function
+    function: file_length("{{finalSubdomainFile}}")
+    exports:
+      subdomain_count: "{{result}}"
+
+  - name: check-subdomain-results
+    type: bash
+    command: "echo {{subdomain_count}}"
+    decision:
+      switch: 'file_length("{{finalSubdomainFile}}") > 0'
+      cases:
+        "false":
+          goto: _end
+      default:
+        goto: http-probing
+
+  - name: http-probing
+    type: bash
+    command: |
+      {{Binaries}}/pd-httpx -l {{finalSubdomainFile}} -threads {{httpxThreads}} -timeout {{httpxTimeout}} -silent -json -output {{Output}}/probing/httpx-{{TargetSpace}}.json
+      jq -r '.url // .input' {{Output}}/probing/httpx-{{TargetSpace}}.json >> {{httpxFile}}
+    timeout: 9000
+    exports:
+      httpxFile: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+    on_error:
+      - action: log
+        message: "HTTP probing failed"
+      - action: run
+        step: fallback-probing
+
+  - name: fallback-probing
+    type: bash
+    pre_condition: "file_length('{{httpxFile}}') == 0"
+    command: "cat {{finalSubdomainFile}} | xargs -I {} curl -s -o /dev/null -w '%{httpCode} {}\\n' http://{} 2>/dev/null | grep '^200' | awk '{print $2}' > {{httpxFile}}"
+    exports:
+      httpxFile: "{{Output}}/probing/httpx-{{TargetSpace}}.txt"
+
+  - name: process-content-discovery-fingerprint-in-db
+    type: function
+    log: "Processing content discovery fingerprint in db"
+    pre_condition: 'file_exists("{{httpxProbeJsonFile}}")'
+    function: |
+      db_import_asset_from_file("{{TargetSpace}}", "{{httpxProbeJsonFile}}")
+    on_error:
+      - action: continue

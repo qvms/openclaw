@@ -1,0 +1,85 @@
+name: finish
+kind: module
+tags: recon
+
+params:
+  - name: target
+    required: true
+  - name: detailed-host-analysis
+    type: foreach
+
+steps:
+
+  - name: count-live-hosts
+    type: function
+    function: file_length("{{httpxFile}}")
+    exports:
+      live_host_count: "output"
+
+  - name: detailed-host-analysis
+    type: foreach
+    pre_condition: 'parse_int("{{live_host_count}}") > 0 && parse_int("{{live_host_count}}") < 50'
+    input: "{{httpxFile}}"
+    variable: host
+    threads: 5
+    step:
+      name: analyze-single-host
+      type: bash
+      command: |
+        echo "Analyzing [[host]]..."
+        curl -s -I "[[host]]" 2>/dev/null | head -20 >> {{Output}}/probing/headers-{{TargetSpace}}.txt
+        echo "---" >> {{Output}}/probing/headers-{{TargetSpace}}.txt
+      timeout: 3000
+
+  - name: process-nuclei-results
+    type: function
+    pre_condition: 'file_exists("{{Output}}/vulnscan/results-{{TargetSpace}}.json")'
+    parallel_functions:
+      - db_vuln_critical("{{Output}}/vulnscan/results-{{TargetSpace}}.json")
+      - db_vuln_high("{{Output}}/vulnscan/results-{{TargetSpace}}.json")
+      - db_vuln_medium("{{Output}}/vulnscan/results-{{TargetSpace}}.json")
+      - db_vuln_low("{{Output}}/vulnscan/results-{{TargetSpace}}.json")
+      - db_import_asset_from_file("{{Workspace}}", "{{Output}}/vulnscan/results-{{TargetSpace}}.json")
+    exports:
+      vuln_stats: "output"
+
+  - name: generate-report
+    type: bash
+    commands:
+      - |
+        echo "=== Web Reconnaissance Report ===" > {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "Target: {{Target}}" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "Workspace: {{TargetSpace}}" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "Date: $(date)" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "=== Statistics ===" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "Total Subdomains: {{subdomain_count}}" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "Live Hosts: {{live_host_count}}" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "=== Live Hosts ===" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        cat {{httpxFile}} >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt 2>/dev/null || echo "No live hosts found"
+      - "cp {{httpxFile}} {{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt 2>/dev/null || touch {{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt"
+      - "cp {{Output}}/vulnscan/results-{{TargetSpace}}.json {{Output}}/web-recon/vulnerabilities-{{TargetSpace}}.json 2>/dev/null || echo '[]' > {{Output}}/web-recon/vulnerabilities-{{TargetSpace}}.json"
+
+  - name: generate-empty-report
+    type: bash
+    pre_condition: '"{{has_subdomains}}" == "false"'
+    commands:
+      - |
+        echo "=== Web Reconnaissance Report ===" > {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "Target: {{Target}}" >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+        echo "No subdomains found for target." >> {{Output}}/web-recon/final-report-{{TargetSpace}}.txt
+      - "touch {{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt"
+      - "echo '[]' > {{Output}}/web-recon/vulnerabilities-{{TargetSpace}}.json"
+
+  - name: final-cleanup
+    type: function
+    functions:
+      - sort_unix("{{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt")
+      - db_import_asset_from_file("{{Workspace}}", "{{Output}}/web-recon/live-hosts-{{TargetSpace}}.txt")
+
+  - name: notify-completion
+    type: function
+    pre_condition: 'parse_int("{{subdomain_count}}") > 0'
+    functions:
+      - 'printf("Scan complete: {{subdomain_count}} subdomains, {{live_host_count}} live hosts")'
