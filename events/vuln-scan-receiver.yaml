@@ -1,0 +1,83 @@
+name: vuln-scan-receiver
+kind: module
+description: Simple workflow that receives and processes events
+tags: event,receiver,trigger,example
+hidden: true
+
+triggers:
+  - name: manual-trigger
+    on: manual
+    enabled: true
+
+  - name: on-asset-vars
+    on: event
+    event:
+      topic: "*"
+    input:
+      Target: pick_valid(event_data.sample, event_data.value)
+      RawData: event.data
+      asset_type: event.type
+      source: event.source
+      description: trim_left(event.topic, 'test.')
+    enabled: true
+
+params:
+  - name: Target
+    required: true
+
+  - name: httpxInterestingFile
+    default: "{{Output}}/fingerprint/httpx-interesting-{{TargetSpace}}.txt"
+  - name: httpxFingerprintJsonFile
+    default: "{{Output}}/fingerprint/httpx-fingerprint-{{TargetSpace}}.jsonl"
+  - name: httpInterestingFilteredJsonFile
+    default: "{{Output}}/fingerprint/httpx-interesting-filtered-{{TargetSpace}}.jsonl"
+  - name: httpInterestingMarkdownFile
+    default: "{{Output}}/fingerprint/httpx-interesting-filtered-{{TargetSpace}}.md"
+  - name: httpxThreads
+    default: "{{ threads * 2 }}"
+  - name: httpTimeout
+    default: "15"
+  - name: defaultUA
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.15"
+
+  - name: nucleiOutputJsonl
+    default: "{{Output}}/vulnscan/nuclei-jsonl-{{TargetSpace}}.txt"
+
+  - name: nucleiCleanOutputJsonl
+    default: "{{Output}}/vulnscan/clean-jsonl-{{TargetSpace}}.txt"
+
+  - name: nucleiMarkdownReport
+    default: "{{Output}}/vulnscan/nuclei-overview-report-{{TargetSpace}}.md"
+
+  - name: nucleiTemplateConfig
+    default: "~/nuclei-templates/"
+  - name: nucleiThreads
+    default: "{{ threads * 10 }}"
+
+  - name: nucleiTimeout
+    default: "8h"
+  - name: nucleiSeverity
+    default: "critical,high,medium,low,info"
+
+  - name: extraNuclei
+    default: " "
+
+steps:
+  - name: create-output-folder
+    type: function
+    log: "Creating fingerprint output folder"
+    functions:
+      - 'create_folder("{{Output}}/fingerprint")'
+      - 'create_folder("{{Output}}/vulnscan")'
+
+  - name: http-fingerprint
+    type: bash
+    log: "Fingerprinting HTTP hosts with pd-httpx"
+    commands:
+      - 'echo {{Target}} | pd-httpx -H "{{defaultUA}}" -timeout {{httpTimeout}} -t {{httpxThreads}} -no-fallback -no-color -silent -json -title -favicon -hash sha256 -jarm -tech-detect -status-code -cdn -tls-grab -ztls -vhost -follow-host-redirects -include-chain >> {{httpxFingerprintJsonFile}}'
+
+  - name: nuclei-scan
+    type: bash
+    log: "Running Nuclei vulnerability scan"
+    commands:
+      - "echo {{Target}} | nuclei -H '{{defaultUA}}' -silent -c {{nucleiThreads}} -jsonl -severity '{{nucleiSeverity}}' -t {{nucleiTemplateConfig}} -irr -o {{nucleiOutputJsonl}} {{extraNuclei}} > /dev/null 2>&1"
