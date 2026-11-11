@@ -1,0 +1,44 @@
+name: api
+kind: flow
+desc: V1
+
+params:
+  - name: enableDnsBruteFocing
+    default: "false"
+  - name: enableStoreHTTPResponse
+    default: "true"
+
+dependencies:
+  variables:
+    - name: Target
+      type: domain
+      required: true
+
+modules:
+  - name: enum-subdomain
+    path: common/enum-subdomain.yaml
+
+  - name: probe-dns
+    path: common/probe-dns.yaml
+    depends_on:
+      - enum-subdomain
+
+  - name: recon-http-fp
+    path: common/recon-http-fp.yaml
+    depends_on:
+      - probe-dns
+
+  - name: recon-spider
+    path: common/recon-spider.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: util-archive
+    path: common/util-archive.yaml
+    depends_on:
+      - recon-http-fp
+
+  - name: hist-discovery
+    path: common/hist-discovery.yaml
+    depends_on:
+      - recon-http-fp

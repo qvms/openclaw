@@ -1,0 +1,8 @@
+kind: flow
+name: urlpipe
+description: Alias for url workflow
+extends: nuke
+tags: nuclei, url, katana
+help:
+  example_targets: ['https://example.com', 'https://httpbin.org', 'example.com']
+  usage: osmedeus run -f urlpipe -t https://example.com
