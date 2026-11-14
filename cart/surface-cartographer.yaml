@@ -1,0 +1,125 @@
+kind: module
+name: surface-cartographer
+description: Probe every open HTTP/HTTPS port, crawl URLs, fingerprint tech, map API surface
+tags: surface, http, api, s2
+
+triggers:
+  - name: on-ports
+    on: event
+    event:
+      topic: "assets.ports"
+      filters: ["event.source == 'infra-mapper'"]
+      dedupe_key: "{{event.data}}"
+      dedupe_window: 10m
+    input:
+      target: event_data.value
+    enabled: true
+  - name: manual
+    on: manual
+    enabled: true
+
+params:
+  - name: portsFile
+    default: "{{Output}}/infra/open-ports.txt"
+  - name: servicesFile
+    default: "{{Output}}/infra/services.jsonl"
+  - name: surfaceDir
+    default: "{{Output}}/surface"
+  - name: httpThreads
+    default: "{{ threads * 4 }}"
+  - name: crawlDepth
+    default: "3"
+  - name: rateLimit
+    default: "50"
+
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - { name: live-urls,      path: "{{surfaceDir}}/live-urls.txt",      type: text }
+  - { name: tech,           path: "{{surfaceDir}}/tech.jsonl",         type: jsonl }
+  - { name: api-candidates, path: "{{surfaceDir}}/api-candidates.txt", type: text }
+  - { name: counts,         path: "{{surfaceDir}}/counts.json",        type: json }
+
+steps:
+  - name: preflight
+    type: bash
+    commands:
+      - mkdir -p {{surfaceDir}}
+      - test -s {{portsFile}}
+
+  - name: probe-live
+    type: bash
+    commands:
+      - |
+        httpx -l {{portsFile}} -silent -nc -fr -t {{httpThreads}} -rl {{rateLimit}} \
+          -sc -cl -ct -title -server -ip -cdn -tls-grab -json \
+          -o {{surfaceDir}}/httpx-raw.jsonl
+        jq -r '.url' {{surfaceDir}}/httpx-raw.jsonl | sort -u > {{surfaceDir}}/live-urls.txt
+
+  - name: gate-live
+    type: decision
+    switch: "{{ fileLength(surfaceDir + '/live-urls.txt') }}"
+    cases:
+      "0": { goto: _end }
+
+  - name: collect-and-fingerprint
+    type: parallel-steps
+    parallel_steps:
+      - name: crawl
+        type: bash
+        commands:
+          - katana -list {{surfaceDir}}/live-urls.txt -d {{crawlDepth}} -jc -kf all -rl {{rateLimit}} -silent -o {{surfaceDir}}/urls-crawled.txt
+      - name: fingerprint
+        type: bash
+        commands:
+          - |
+            httpx -l {{surfaceDir}}/live-urls.txt -silent -td -favicon -hash sha256 -json \
+              | jq -c '{url,host,port,status_code,webserver,tech,cdn_name,title,hash,favicon}' \
+              > {{surfaceDir}}/tech.jsonl
+
+  - name: api-probe
+    type: foreach
+    input: "{{surfaceDir}}/live-urls.txt"
+    variable: origin
+    threads: "{{httpThreads}}"
+    step:
+      name: api-paths
+      type: bash
+      commands:
+        - |
+          for p in /openapi.json /swagger.json /v2/api-docs /v3/api-docs /swagger-ui/ /api/ /graphql /.well-known/openid-configuration; do
+            c=$(curl -sk -o /dev/null -w '%{http_code}' -m 10 "[[origin]]$p")
+            case "$c" in 200|401|403|405) echo "[[origin]]$p $c" ;; esac
+          done >> {{surfaceDir}}/api-probe.txt
+
+  - name: api-triage
+    type: agent
+    query: >
+      Read {{surfaceDir}}/urls-crawled.txt and {{surfaceDir}}/api-probe.txt. Output one URL per line
+      that is an API candidate (REST/GraphQL/spec/auth endpoints, /api/, /v[0-9]/, json content).
+      Drop static assets and out-of-scope hosts. Write to {{surfaceDir}}/api-candidates.txt.
+    agent_tools:
+      - preset: read_file
+      - preset: jq
+      - preset: bash
+    max_iterations: 15
+
+  - name: merge-and-count
+    type: bash
+    commands:
+      - |
+        cat {{surfaceDir}}/live-urls.txt {{surfaceDir}}/urls-crawled.txt | sort -u > {{surfaceDir}}/all-urls.txt
+        jq -n --arg ports "$(wc -l < {{portsFile}})" --arg live "$(wc -l < {{surfaceDir}}/live-urls.txt)" \
+              --arg urls "$(wc -l < {{surfaceDir}}/all-urls.txt)" --arg api "$(wc -l < {{surfaceDir}}/api-candidates.txt)" \
+              '{open_ports:$ports,live_urls:$live,urls:$urls,api_candidates:$api}' > {{surfaceDir}}/counts.json
+
+  - name: emit-events
+    type: function
+    functions:
+      - 'db_import_asset_from_file("{{surfaceDir}}/tech.jsonl")'
+      - 'generate_event_from_file("{{Target}}", "assets.urls", "surface-cartographer", "url", "{{surfaceDir}}/all-urls.txt")'
+      - 'print_green("surface done: {{surfaceDir}}/counts.json")'

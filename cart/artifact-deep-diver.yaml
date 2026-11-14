@@ -1,0 +1,467 @@
+kind: module
+name: artifact-deep-diver
+description: >
+  Static analysis, deep code review, mobile/binary inspection, and cross-asset
+  correlation. Terminal handoff for the $2 pipeline.
+tags: deep, sast, secrets, mobile, binary, s2
+
+triggers:
+  - name: on-repo-asset
+    on: event
+    event:
+      topic: "assets.new"
+      filters:
+        - "event.data_type == 'repository' || event.data_type == 'source'"
+      dedupe_key: "{{event.data}}"
+      dedupe_window: 30m
+    input:
+      Target: pick_valid(event_data.sample, event_data.value)
+      assetType: '"repository"'
+    enabled: true
+
+  - name: on-mobile-asset
+    on: event
+    event:
+      topic: "assets.new"
+      filters:
+        - "event.data_type == 'apk' || event.data_type == 'ipa' || event.data_type == 'mobile'"
+      dedupe_key: "{{event.data}}"
+      dedupe_window: 30m
+    input:
+      Target: pick_valid(event_data.sample, event_data.value)
+      assetType: '"mobile"'
+    enabled: true
+
+  - name: on-binary-asset
+    on: event
+    event:
+      topic: "assets.new"
+      filters:
+        - "event.data_type == 'binary' || event.data_type == 'elf' || event.data_type == 'pe'"
+      dedupe_key: "{{event.data}}"
+      dedupe_window: 30m
+    input:
+      Target: pick_valid(event_data.sample, event_data.value)
+      assetType: '"binary"'
+    enabled: true
+
+  - name: on-vulns-ready
+    on: event
+    event:
+      topic: "vulns.new"
+      filters: ["event.source == 'vuln-orchestrator'"]
+    input:
+      Target: "{{TargetSpace}}"
+      assetType: '"correlate"'
+    enabled: true
+
+  - name: manual
+    on: manual
+    enabled: true
+
+params:
+  - name: assetType
+    default: "repository"
+
+  - name: deepDir
+    default: "{{Output}}/deep"
+  - name: reposDir
+    default: "{{Output}}/deep/repos-analysis"
+  - name: mobileDir
+    default: "{{Output}}/deep/mobile"
+  - name: binariesDir
+    default: "{{Output}}/deep/binaries"
+  - name: finalDir
+    default: "{{Output}}/deep/final"
+
+  - name: workFolder
+    default: "{{Output}}/deep/work/{{TargetSpace}}"
+
+  - name: semgrepJobs
+    default: "15"
+  - name: kingfisherJobs
+    default: "15"
+  - name: gitDepth
+    default: "1000"
+
+  - name: semgrepSarif
+    default: "{{reposDir}}/semgrep-{{TargetSpace}}.sarif"
+  - name: kingfisherSarif
+    default: "{{reposDir}}/kingfisher-{{TargetSpace}}.sarif"
+  - name: trivySarif
+    default: "{{reposDir}}/trivy-{{TargetSpace}}.sarif"
+  - name: bearerSarif
+    default: "{{reposDir}}/bearer-{{TargetSpace}}.sarif"
+  - name: mergedSarif
+    default: "{{finalDir}}/report.sarif"
+  - name: finalReport
+    default: "{{finalDir}}/report.md"
+
+  - name: vulnsFindings
+    default: "{{Output}}/vulns/findings.jsonl"
+  - name: inventoryAssets
+    default: "{{Output}}/inventory/assets.jsonl"
+
+dependencies:
+  commands:
+    - semgrep
+    - kingfisher
+    - trivy
+    - jq
+    - git
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - { name: repos-analysis, path: "{{reposDir}}/",              type: folder }
+  - { name: mobile,         path: "{{mobileDir}}/",             type: folder }
+  - { name: binaries,       path: "{{binariesDir}}/",           type: folder }
+  - { name: final-report,   path: "{{finalReport}}",            type: text }
+  - { name: final-sarif,    path: "{{mergedSarif}}",            type: text }
+  - { name: counts,         path: "{{finalDir}}/counts.json",   type: json }
+
+hooks:
+  on_start:
+    - 'print_green("artifact-deep-diver start: type={{assetType}} target={{Target}}")'
+  on_done:
+    - 'print_green("artifact-deep-diver done → {{finalReport}}")'
+
+steps:
+  - name: preflight
+    type: function
+    log: "Create deep output tree"
+    functions:
+      - 'create_folder("{{reposDir}}")'
+      - 'create_folder("{{mobileDir}}")'
+      - 'create_folder("{{binariesDir}}")'
+      - 'create_folder("{{finalDir}}")'
+      - 'create_folder("{{workFolder}}")'
+
+  - name: route-asset
+    type: decision
+    switch: "{{assetType}}"
+    cases:
+      repository: { goto: ingest-repo }
+      source:     { goto: ingest-repo }
+      mobile:     { goto: ingest-mobile }
+      apk:        { goto: ingest-mobile }
+      ipa:        { goto: ingest-mobile }
+      binary:     { goto: ingest-binary }
+      elf:        { goto: ingest-binary }
+      pe:         { goto: ingest-binary }
+      correlate:  { goto: correlate }
+      default:    { goto: ingest-repo }
+
+  - name: ingest-repo
+    type: function
+    log: "Normalize Target into workFolder (git / folder / archive / URL)"
+    functions:
+      - 'rm_rf("{{workFolder}}")'
+      - 'create_folder("{{workFolder}}")'
+
+  - name: clone-or-extract-repo
+    type: bash
+    log: "Acquire repository contents"
+    commands:
+      - |
+        set -e
+        T="{{Target}}"
+        W="{{workFolder}}"
+        if [ -d "$T" ]; then
+          cp -a "$T/." "$W/"
+        elif echo "$T" | grep -Eq '\.(zip|tar\.gz|tgz|tar)$'; then
+          # local or remote archive
+          if echo "$T" | grep -Eq '^https?://'; then
+            wget -q -O /tmp/{{TargetSpace}}-archive "$T"
+            # extract_to handled below via function fallback path
+            mkdir -p "$W" && tar -xf /tmp/{{TargetSpace}}-archive -C "$W" 2>/dev/null \
+              || unzip -q /tmp/{{TargetSpace}}-archive -d "$W"
+          else
+            tar -xf "$T" -C "$W" 2>/dev/null || unzip -q "$T" -d "$W"
+          fi
+        elif echo "$T" | grep -Eq '^https?://.*(github|gitlab|bitbucket)'; then
+          git clone --depth={{gitDepth}} "$T" "$W"
+        else
+          echo "unsupported repo target: $T" >&2
+          exit 1
+        fi
+    on_error:
+      - action: continue
+
+  - name: extract-archive-fallback
+    type: function
+    log: "Fallback extract_to for compressed targets"
+    pre_condition: 'is_compress("{{Target}}")'
+    functions:
+      - 'extract_to("{{Target}}", "{{workFolder}}")'
+    on_error:
+      - action: continue
+
+  - name: detect-lang
+    type: function
+    log: "Detect primary language"
+    functions:
+      - 'var repoLanguage = detect_language("{{workFolder}}") ; printf("language=" + repoLanguage)'
+    exports:
+      repoLanguage: 'detect_language("{{workFolder}}")'
+
+  - name: sast-parallel
+    type: parallel-steps
+    parallel_steps:
+      - name: semgrep
+        type: bash
+        commands:
+          - "semgrep scan --quiet --config auto --jobs={{semgrepJobs}} --sarif-output={{semgrepSarif}} {{workFolder}}"
+        on_error: [{ action: continue }]
+      - name: kingfisher
+        type: bash
+        commands:
+          - "kingfisher --quiet scan {{workFolder}} --num-jobs {{kingfisherJobs}} --format sarif --output {{kingfisherSarif}}"
+        on_error: [{ action: continue }]
+      - name: trivy
+        type: bash
+        commands:
+          - "trivy --quiet fs {{workFolder}} --format sarif --output {{trivySarif}}"
+        on_error: [{ action: continue }]
+
+  - name: bearer-fallback
+    type: bash
+    log: "Bearer if semgrep produced nothing"
+    pre_condition: '!file_exists("{{semgrepSarif}}")'
+    commands:
+      - "bearer --quiet scan {{workFolder}} --format sarif --output {{bearerSarif}}"
+    on_error: [{ action: continue }]
+
+  - name: import-repo-sarif
+    type: function
+    log: "Import SARIF + markdown"
+    functions:
+      - 'file_exists("{{semgrepSarif}}") && db_import_sarif("{{Workspace}}", "{{semgrepSarif}}")'
+      - 'file_exists("{{kingfisherSarif}}") && db_import_sarif("{{Workspace}}", "{{kingfisherSarif}}")'
+      - 'file_exists("{{trivySarif}}") && db_import_sarif("{{Workspace}}", "{{trivySarif}}")'
+      - 'file_exists("{{bearerSarif}}") && db_import_sarif("{{Workspace}}", "{{bearerSarif}}")'
+      - 'file_exists("{{semgrepSarif}}") && convert_sarif_to_markdown("{{semgrepSarif}}", "{{reposDir}}/semgrep-{{TargetSpace}}.md")'
+      - 'file_exists("{{kingfisherSarif}}") && convert_sarif_to_markdown("{{kingfisherSarif}}", "{{reposDir}}/kingfisher-{{TargetSpace}}.md")'
+      - 'file_exists("{{trivySarif}}") && convert_sarif_to_markdown("{{trivySarif}}", "{{reposDir}}/trivy-{{TargetSpace}}.md")'
+    on_error: [{ action: continue }]
+
+  - name: deep-code-review
+    type: agent-acp
+    log: "Agent-driven deep review of high-confidence SAST hits"
+    provider: claude-code
+    cwd: "{{workFolder}}"
+    allowed_paths:
+      - "{{workFolder}}"
+      - "{{reposDir}}"
+    write_enabled: true
+    plan_prompt: >
+      You are ArtifactDeepDiver. Review {{workFolder}} guided by SARIF under {{reposDir}}.
+      Focus on HIGH-CONFIDENCE, exploitable issues (injection, authz bypass, RCE, SSRF,
+      insecure deserialization, secret misuse). Skip DoS/style noise.
+      Write a structured findings file to {{reposDir}}/deep-review-{{TargetSpace}}.jsonl
+      (one JSON object per finding: rule, file, line, severity, evidence, exploit_notes)
+      and a short markdown summary to {{reposDir}}/deep-review-{{TargetSpace}}.md.
+    output_schema:
+      type: object
+      properties:
+        findings_path: { type: string }
+        summary_path:  { type: string }
+        finding_count: { type: integer }
+    memory:
+      persist: true
+      key: "deep-review-{{TargetSpace}}"
+    on_error: [{ action: continue }]
+
+  - name: after-repo
+    type: decision
+    switch: '"ok"'
+    cases:
+      default: { goto: correlate }
+
+  - name: ingest-mobile
+    type: function
+    log: "Stage mobile package"
+    functions:
+      - 'create_folder("{{mobileDir}}/{{TargetSpace}}")'
+      - 'is_compress("{{Target}}") && extract_to("{{Target}}", "{{mobileDir}}/{{TargetSpace}}/raw")'
+
+  - name: mobile-static
+    type: remote-bash
+    log: "APK/IPA static unpack + secrets in docker"
+    image: "osmedeus/mobile-static:latest"
+    commands:
+      - |
+        PKG="{{Target}}"
+        OUT="{{mobileDir}}/{{TargetSpace}}"
+        mkdir -p "$OUT"
+        case "$PKG" in
+          *.apk|*.APK)
+            jadx -d "$OUT/jadx" -q "$PKG" || true
+            apktool d -f -o "$OUT/apktool" "$PKG" || true
+            ;;
+          *.ipa|*.IPA)
+            unzip -q "$PKG" -d "$OUT/ipa" || true
+            ;;
+        esac
+        # secrets over unpacked tree
+        kingfisher --quiet scan "$OUT" --format sarif --output "$OUT/kingfisher.sarif" || true
+        # exported components / ATS / cleartext flags
+        [ -f "$OUT/apktool/AndroidManifest.xml" ] && \
+          grep -E 'exported=|allowBackup|usesCleartextTraffic|android:debuggable' \
+            "$OUT/apktool/AndroidManifest.xml" > "$OUT/manifest-flags.txt" || true
+    on_error: [{ action: continue }]
+
+  - name: mobile-agent-review
+    type: agent
+    log: "Sub-agent triage of mobile surface"
+    query: >
+      Inspect {{mobileDir}}/{{TargetSpace}} (jadx/apktool or ipa unpack + kingfisher.sarif
+      + manifest-flags.txt). Emit HIGH-confidence mobile findings
+      (exported components, insecure storage, weak crypto, hardcoded secrets, cleartext)
+      to {{mobileDir}}/{{TargetSpace}}/findings.jsonl and a short md summary.
+    agent_tools:
+      - preset: read_file
+      - preset: bash
+      - preset: jq
+    max_iterations: 20
+    on_error: [{ action: continue }]
+
+  - name: import-mobile-sarif
+    type: function
+    pre_condition: 'file_exists("{{mobileDir}}/{{TargetSpace}}/kingfisher.sarif")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{mobileDir}}/{{TargetSpace}}/kingfisher.sarif")'
+      - 'convert_sarif_to_markdown("{{mobileDir}}/{{TargetSpace}}/kingfisher.sarif", "{{mobileDir}}/{{TargetSpace}}/kingfisher.md")'
+    on_error: [{ action: continue }]
+
+  - name: after-mobile
+    type: decision
+    switch: '"ok"'
+    cases:
+      default: { goto: correlate }
+
+  - name: ingest-binary
+    type: function
+    functions:
+      - 'create_folder("{{binariesDir}}/{{TargetSpace}}")'
+
+  - name: binary-static
+    type: remote-bash
+    log: "Binary triage in docker (strings, checksec, capa-lite)"
+    image: "osmedeus/binary-static:latest"
+    commands:
+      - |
+        BIN="{{Target}}"
+        OUT="{{binariesDir}}/{{TargetSpace}}"
+        mkdir -p "$OUT"
+        file "$BIN" | tee "$OUT/file.txt"
+        strings -n 8 "$BIN" | head -n 5000 > "$OUT/strings.txt" || true
+        # checksec / hardening if ELF
+        (checksec --file="$BIN" 2>/dev/null || true) | tee "$OUT/checksec.txt"
+        # quick secret-ish pattern pass over strings
+        grep -Eai 'api[_-]?key|secret|password|aws_access|BEGIN (RSA |OPENSSH )?PRIVATE' \
+          "$OUT/strings.txt" > "$OUT/string-secrets.txt" || true
+    on_error: [{ action: continue }]
+
+  - name: binary-agent-review
+    type: agent
+    log: "Sub-agent binary findings"
+    query: >
+      Read {{binariesDir}}/{{TargetSpace}}/{file,checksec,string-secrets,strings}.txt.
+      Produce HIGH-confidence binary findings (hardcoded creds, dangerous imports,
+      missing hardening) as {{binariesDir}}/{{TargetSpace}}/findings.jsonl + summary.md.
+    agent_tools:
+      - preset: read_file
+      - preset: bash
+      - preset: jq
+    max_iterations: 15
+    on_error: [{ action: continue }]
+
+  - name: after-binary
+    type: decision
+    switch: '"ok"'
+    cases:
+      default: { goto: correlate }
+
+  - name: correlate
+    type: agent-acp
+    log: "Cross-asset correlation: inventory + vulns + deep findings → final report"
+    provider: claude-code
+    cwd: "{{Output}}"
+    allowed_paths:
+      - "{{Output}}/deep"
+      - "{{Output}}/vulns"
+      - "{{Output}}/inventory"
+      - "{{Output}}/surface"
+      - "{{Output}}/infra"
+    write_enabled: true
+    plan_prompt: >
+      Correlate artifacts under {{Output}}/deep with {{vulnsFindings}} and {{inventoryAssets}}.
+      Merge duplicate issues, link web vulns to source/mobile/binary evidence when paths match,
+      rank by exploitable impact. Write:
+        - {{finalReport}}  (markdown executive + technical)
+        - {{mergedSarif}}  (merged SARIF of all imported findings)
+        - {{finalDir}}/findings.jsonl
+        - {{finalDir}}/counts.json  {repos,mobile,binaries,sast,secrets,correlated,critical,high}
+      Be concrete; cite file:line and asset hosts. No filler.
+    output_schema:
+      type: object
+      required: [report_path, sarif_path, counts]
+      properties:
+        report_path: { type: string }
+        sarif_path:  { type: string }
+        counts:      { type: object }
+    memory:
+      persist: true
+      key: "final-correlate-{{TargetSpace}}"
+    on_error: [{ action: continue }]
+
+  - name: merge-sarif-fallback
+    type: bash
+    log: "If agent did not emit merged SARIF, concatenate available SARIFs"
+    pre_condition: '!file_exists("{{mergedSarif}}")'
+    commands:
+      - |
+        mkdir -p {{finalDir}}
+        # naive concat of runs[] — agent path preferred; this is a safety net
+        find {{reposDir}} {{mobileDir}} {{binariesDir}} -name '*.sarif' -print0 2>/dev/null \
+          | xargs -0 -I{} cat {} > {{mergedSarif}}.raw || true
+        [ -s {{mergedSarif}}.raw ] && mv {{mergedSarif}}.raw {{mergedSarif}} || true
+    on_error: [{ action: continue }]
+
+  - name: import-final
+    type: function
+    log: "Final DB population"
+    functions:
+      - 'file_exists("{{mergedSarif}}") && db_import_sarif("{{Workspace}}", "{{mergedSarif}}")'
+      - 'file_exists("{{mergedSarif}}") && convert_sarif_to_markdown("{{mergedSarif}}", "{{finalDir}}/report-from-sarif.md")'
+    on_error: [{ action: continue }]
+
+  - name: counts-fallback
+    type: bash
+    pre_condition: '!file_exists("{{finalDir}}/counts.json")'
+    commands:
+      - |
+        jq -n \
+          --argjson repos "$(find {{reposDir}} -type f 2>/dev/null | wc -l)" \
+          --argjson mobile "$(find {{mobileDir}} -type f 2>/dev/null | wc -l)" \
+          --argjson binaries "$(find {{binariesDir}} -type f 2>/dev/null | wc -l)" \
+          '{repos:$repos,mobile:$mobile,binaries:$binaries}' > {{finalDir}}/counts.json
+
+  - name: emit-completed
+    type: function
+    log: "Emit scan.completed + handoff paths"
+    functions:
+      - >
+        generate_event("{{TargetSpace}}", "scan.completed", "artifact-deep-diver", "summary",
+          {
+            "repos": "{{reposDir}}",
+            "mobile": "{{mobileDir}}",
+            "binaries": "{{binariesDir}}",
+            "report": "{{finalReport}}",
+            "sarif": "{{mergedSarif}}",
+            "counts": "{{finalDir}}/counts.json"
+          })
+      - 'print_green("HANDOFF {{finalReport}} | {{mergedSarif}} | scan.completed")'

@@ -1,0 +1,122 @@
+kind: module
+name: infra-map
+description: CDN/WAF/cloud classify, port scan, service detect, handoff to SurfaceCartographer
+tags: network, portscan, nmap, cdn, inframapper
+
+triggers:
+  - name: manual
+    on: manual
+    enabled: true
+  - name: on-scope-ready
+    on: event
+    event:
+      topic: "assets.new"
+      filters:
+        - "event.data_type == 'ip' || event.data_type == 'cidr'"
+    input:
+      Target: event_data.value
+    enabled: true
+
+params:
+  - name: inv
+    default: "{{Output}}/inventory"
+  - name: infra
+    default: "{{Output}}/infra"
+  - name: scanList
+    default: "{{Output}}/infra/scan-targets.txt"
+  - name: classifyFile
+    default: "{{Output}}/infra/cdn-waf-cloud.jsonl"
+  - name: originIPs
+    default: "{{Output}}/infra/origin-ips.txt"
+  - name: edgeIPs
+    default: "{{Output}}/infra/edge-ips.txt"
+  - name: edgePorts
+    default: "80,443,8080,8443"
+  - name: fullPorts
+    default: "1-65535"
+  - name: naabuRate
+    default: "{{ threads * 100 }}"
+  - name: openPortsFile
+    default: "{{Output}}/infra/open-ports.txt"
+  - name: nmapFlags
+    default: "-sV -Pn --version-light"
+  - name: nmapOutput
+    default: "{{Output}}/infra/nmap-{{TargetSpace}}"
+  - name: nmapJsonl
+    default: "{{Output}}/infra/nmap-{{TargetSpace}}.jsonl"
+  - name: servicesFile
+    default: "{{Output}}/infra/services.jsonl"
+
+dependencies:
+  commands: [naabu, nmap, cdncheck, jq, mapcidr]
+  variables:
+    - name: Target
+      type: cidr,ip,file
+      required: true
+
+reports:
+  - { name: open-ports, path: "{{openPortsFile}}", type: text }
+  - { name: services,   path: "{{servicesFile}}",  type: jsonl }
+  - { name: nmap,       path: "{{nmapJsonl}}",     type: jsonl }
+  - { name: cdn-flags,  path: "{{classifyFile}}",  type: jsonl }
+
+steps:
+  - name: setup
+    type: function
+    functions:
+      - create_folder("{{infra}}")
+
+  - name: intake
+    type: bash
+    log: "Building scan list from inventory or target"
+    commands:
+      - 'if [ -s {{inv}}/ips.txt ] || [ -s {{inv}}/cidrs.txt ]; then cat {{inv}}/ips.txt {{inv}}/cidrs.txt 2>/dev/null | sort -u > {{scanList}}; elif [ -f "{{Target}}" ]; then sort -u "{{Target}}" > {{scanList}}; else echo "{{Target}}" > {{scanList}}; fi'
+      - 'mapcidr -silent -l {{scanList}} -o {{infra}}/expanded-ips.txt'
+
+  - name: classify
+    type: bash
+    log: "Classifying CDN/WAF/cloud"
+    commands:
+      - 'cdncheck -silent -jsonl -resp -i {{infra}}/expanded-ips.txt -o {{classifyFile}}'
+      - 'jq -r "select(.cdn or .waf) | .input" {{classifyFile}} | sort -u > {{edgeIPs}}'
+      - 'comm -23 <(sort -u {{infra}}/expanded-ips.txt) {{edgeIPs}} > {{originIPs}}'
+
+  - name: port-discovery
+    type: parallel-steps
+    parallel_steps:
+      - name: origin-sweep
+        type: bash
+        pre_condition: 'file_length("{{originIPs}}") > 0'
+        command: 'naabu -silent -l {{originIPs}} -p {{fullPorts}} -rate {{naabuRate}} -o {{infra}}/open-origin.txt'
+      - name: edge-sweep
+        type: bash
+        pre_condition: 'file_length("{{edgeIPs}}") > 0'
+        command: 'naabu -silent -l {{edgeIPs}} -p {{edgePorts}} -rate {{naabuRate}} -o {{infra}}/open-edge.txt'
+
+  - name: merge-open-ports
+    type: bash
+    commands:
+      - 'cat {{infra}}/open-origin.txt {{infra}}/open-edge.txt 2>/dev/null | sort -u > {{openPortsFile}}'
+
+  - name: service-detect
+    type: bash
+    pre_condition: 'file_length("{{openPortsFile}}") > 0'
+    log: "nmap -sV on open host:port pairs"
+    commands:
+      - 'nmap {{nmapFlags}} -iL <(cut -d: -f1 {{openPortsFile}} | sort -u) -p $(cut -d: -f2 {{openPortsFile}} | sort -un | paste -sd,) -oA {{nmapOutput}}'
+
+  - name: parse-and-import
+    type: function
+    functions:
+      - nmap_to_jsonl("{{nmapOutput}}.xml", "{{nmapJsonl}}")
+      - db_import_port_assets("{{TargetSpace}}", "{{nmapJsonl}}")
+
+  - name: build-services
+    type: bash
+    commands:
+      - 'jq -c --slurpfile c {{classifyFile}} ". as $s | ($c | map(select(.input==$s.ip))[0] // {}) as $f | $s + {cdn:($f.cdn//false), waf:($f.waf//false), cloud:($f.cloud//false), provider:($f.cdn_name // $f.waf_name // $f.cloud_name // null)}" {{nmapJsonl}} > {{servicesFile}}'
+
+  - name: emit-handoff
+    type: function
+    functions:
+      - generate_event_from_file("{{TargetSpace}}", "assets.ports", "inframapper", "port", "{{openPortsFile}}")
