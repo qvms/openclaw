@@ -1,0 +1,33 @@
+kind: module
+name: mod-oos-gate
+description: Strip out-of-scope hosts, wildcards, IP/CIDRs and host+path URLs from phase inputs using the program oos.txt; fail loud if oos.txt is missing
+tags: channel-v, scope, oos, gate, fail-loud, no-network
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: OosFile
+    default: ""
+  - name: OosTargets
+    default: "{{Output}}/subdomain/subdomain-{{TargetSpace}}.txt {{Output}}/probing/dns-{{TargetSpace}}.txt {{Output}}/probing/httpx-{{TargetSpace}}.txt {{Output}}/probing/ips-clean-{{TargetSpace}}.txt {{Output}}/vuln/targets-https-live.txt {{Output}}/archive/archive-urls-{{TargetSpace}}.txt"
+  - name: OosDropped
+    default: "{{Output}}/scope/oos-dropped-{{TargetSpace}}.tsv"
+  - name: OosScript
+    default: ""
+dependencies:
+  commands:
+    - python3
+  variables:
+    - name: Target
+      type: string
+      required: true
+steps:
+  - name: setup-dirs
+    type: function
+    functions:
+      - 'create_folder("{{Output}}/scope")'
+  - name: oos-gate
+    type: bash
+    log: "{{Output}}/scope/oos-gate.log"
+    commands:
+      - 'S="{{OosScript}}"; if [ -z "$S" ]; then for c in "scripts/oos-gate.py" "{{Workflows}}/scripts/oos-gate.py" "../scripts/oos-gate.py"; do [ -f "$c" ] && S="$c" && break; done; fi; [ -n "$S" ] && [ -f "$S" ] || { echo "FAIL-LOUD: oos-gate.py not found (pass --params OosScript=/path)" >&2; exit 5; }; O="{{OosFile}}"; if [ -z "$O" ]; then for c in "{{Output}}/oos.txt" "{{Workspaces}}/oos.txt"; do [ -s "$c" ] && O="$c" && break; done; fi; [ -n "$O" ] && [ -s "$O" ] || { echo "FAIL-LOUD: oos.txt missing or empty (looked in {{Output}} and {{Workspaces}}; scope(1) must ship it; flag lead(2))" >&2; exit 2; }; N=0; for f in {{OosTargets}}; do if [ -f "$f" ]; then python3 "$S" --oos "$O" --in "$f" --dropped "{{OosDropped}}" || exit $?; N=$((N+1)); else echo "skip (absent): $f"; fi; done; echo "oos-gate files_gated=$N dropped_log={{OosDropped}}"'

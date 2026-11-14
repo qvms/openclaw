@@ -1,0 +1,32 @@
+kind: module
+name: mod-surface-v-gate
+description: Channel V post-surface gate — OOS re-gate of archive/ports, targets-https-live present, naabu opens, hard-skip banner; no png check
+tags: surface, channel-v, vps, gate, fail-loud, no-network
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: HardSkipRegex
+    default: ""
+  - name: OosFile
+    default: ""
+  - name: OosScript
+    default: ""
+dependencies:
+  commands:
+    - python3
+  variables:
+    - name: Target
+      type: string
+      required: true
+steps:
+  - name: oos-regate
+    type: bash
+    log: "{{Output}}/scope/oos-gate.log"
+    commands:
+      - 'S="{{OosScript}}"; if [ -z "$S" ]; then for c in "scripts/oos-gate.py" "{{Workflows}}/scripts/oos-gate.py" "../scripts/oos-gate.py"; do [ -f "$c" ] && S="$c" && break; done; fi; [ -n "$S" ] && [ -f "$S" ] || { echo "FAIL-LOUD: oos-gate.py not found" >&2; exit 5; }; O="{{OosFile}}"; if [ -z "$O" ]; then for c in "{{Output}}/oos.txt" "{{Workspaces}}/oos.txt"; do [ -s "$c" ] && O="$c" && break; done; fi; [ -n "$O" ] && [ -s "$O" ] || { echo "FAIL-LOUD: oos.txt missing or empty (looked in {{Output}} and {{Workspaces}}; scope(1) must ship it; flag lead(2))" >&2; exit 2; }; mkdir -p "{{Output}}/scope"; for f in "{{Output}}"/archive/*.txt "{{Output}}"/portscan/*.txt "{{Output}}"/ipspace/*.txt "{{Output}}/vuln/targets-https-live.txt"; do [ -f "$f" ] && { python3 "$S" --oos "$O" --in "$f" --dropped "{{Output}}/scope/oos-dropped-{{TargetSpace}}.tsv" || exit $?; }; done; true'
+  - name: gate
+    type: bash
+    log: "{{Output}}/vuln/surface-gate.log"
+    commands:
+      - 'O="{{Output}}"; T="{{Target}}"; R="$O/vuln/surface-gate.txt"; mkdir -p "$O/vuln"; F=0; SKIP=0; if [ -n "{{HardSkipRegex}}" ]; then echo "$T" | grep -Eq "{{HardSkipRegex}}" && SKIP=1; fi; TL="$O/vuln/targets-https-live.txt"; LIVE=$( [ -f "$TL" ] && grep -c "^https://" "$TL" || echo 0); HX=$( [ -f "$O/probing/httpx-$T.txt" ] && wc -l < "$O/probing/httpx-$T.txt" || echo 0); OPEN=$(cat "$O"/portscan/* 2>/dev/null | grep -Ec ":[0-9]+" || true); ARCH=$(cat "$O"/archive/*.txt 2>/dev/null | wc -l); IPS=$(cat "$O"/ipspace/*.txt 2>/dev/null | wc -l); DROP=$( [ -f "$O/scope/oos-dropped-{{TargetSpace}}.tsv" ] && wc -l < "$O/scope/oos-dropped-{{TargetSpace}}.tsv" || echo 0); { echo "# surface-v gate apex=$T utc=$(date -u +%FT%TZ)"; echo "httpx=$HX https_live=$LIVE naabu_open=$OPEN archive_urls=$ARCH ipspace_lines=$IPS oos_dropped=$DROP screenshots=off"; [ $SKIP -eq 1 ] && echo "HARD-SKIP: $T"; if [ $SKIP -eq 0 ]; then [ -f "$TL" ] || { echo "FAIL: vuln/targets-https-live.txt missing"; F=1; }; [ "$LIVE" -gt 0 ] || { echo "FAIL: targets-https-live.txt empty"; F=1; }; [ "$HX" -gt 0 ] && [ "$OPEN" -eq 0 ] && { echo "FAIL: httpx=$HX but naabu_open=0 — verify connect-scan, retry with ips-clean, else escalate"; F=1; }; [ "$ARCH" -gt 0 ] || echo "WARN: archive output empty"; [ "$IPS" -gt 0 ] || echo "WARN: ipspace output empty"; fi; [ $F -eq 0 ] && echo "GATE: PASS" || echo "GATE: FAIL"; } > "$R"; cat "$R"; if [ $F -ne 0 ]; then exit 4; fi; touch "$O/surface-done.flag"; H="{{Workspaces}}/vuln/targets-https-live.txt"; mkdir -p "{{Workspaces}}/vuln"; cat "$TL" "$H" 2>/dev/null | grep "^https://" | sort -u > "$H.tmp" && mv "$H.tmp" "$H"; echo "published handle gate: $H ($(wc -l < "$H") lines)"'
