@@ -1,0 +1,41 @@
+kind: flow
+name: o-surface-v
+description: Channel V surface on VPS — oos-gate, targets-https-live, util-archive, enum-ipspace, probe-port, V fail-loud gate (no screenshots)
+tags: surface, channel-v, vps, oos, fail-loud
+help:
+  example_targets: ['example.com']
+  usage: |
+    osmedeus run -F vine -f o-surface-v -t example.com \
+      -W ~/workspaces-v/<handle> --threads-hold 16 --concurrency 1
+preferences:
+  silent: true
+  disable_notifications: true
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+modules:
+  - name: mod-oos-gate
+    path: modules/mod-oos-gate.yaml
+  - name: mod-targets-https-live
+    path: modules/mod-targets-https-live.yaml
+    depends_on:
+      - mod-oos-gate
+  - name: util-archive
+    path: common/util-archive.yaml
+    depends_on:
+      - mod-targets-https-live
+  - name: enum-ipspace
+    path: common/enum-ipspace.yaml
+    depends_on:
+      - mod-targets-https-live
+  - name: probe-port
+    path: common/probe-port.yaml
+    depends_on:
+      - enum-ipspace
+  - name: mod-surface-v-gate
+    path: modules/mod-surface-v-gate.yaml
+    depends_on:
+      - util-archive
+      - probe-port

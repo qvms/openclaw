@@ -1,0 +1,54 @@
+kind: module
+name: o-org-host-seed
+description: Write filtered in-scope apex seed + targets-https-live stub from a curated host list
+tags: apk-seed, surface, host-seed, research
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: apex
+    default: "{{apex}}"
+  - name: seed_extra
+    default: ""
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+reports:
+  - name: org-host-seed
+    path: "{{Output}}/seed/org-hosts.txt"
+    type: text
+  - name: targets-https-live
+    path: "{{Output}}/vuln/targets-https-live.txt"
+    type: text
+steps:
+  - name: folders
+    type: function
+    log: "{{Output}}/seed/setup.log"
+    functions:
+      - 'create_folder("{{Output}}/seed")'
+      - 'create_folder("{{Output}}/vuln")'
+  - name: write-curated-seed
+    type: bash
+    log: "{{Output}}/seed/write.log"
+    commands:
+      - |
+        set -e
+        APEX="{{apex}}"
+        SEED="{{Output}}/seed/org-hosts.txt"
+        # Curated in-scope hosts come from {{seed_extra}} (one host per line) or an
+        # engagement overlay. Do NOT hardcode a specific org's hosts here.
+        # Example seed shape (illustrative only):
+        #   id.stg.example.com
+        #   api.stg.example.com
+        #   app.stg.example.com
+        : > "$SEED"
+        if [ -n "{{seed_extra}}" ] && [ -f "{{seed_extra}}" ]; then
+          grep -oE "[A-Za-z0-9.-]+\.${APEX//./\\.}" "{{seed_extra}}" >> "$SEED" || true
+        fi
+        sort -u "$SEED" -o "$SEED"
+        # drop package-name false positives + third-party delivery hosts (OOS)
+        grep -Evi '^(com\.)|bitrise|testflight|github\.com|githubusercontent|firebaseio' "$SEED" > "$SEED.tmp" && mv "$SEED.tmp" "$SEED"
+        awk '{print "https://"$0}' "$SEED" > "{{Output}}/vuln/targets-https-live.txt"
+        wc -l "$SEED" "{{Output}}/vuln/targets-https-live.txt" > "{{Output}}/seed/counts.txt"

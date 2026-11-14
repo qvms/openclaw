@@ -1,0 +1,43 @@
+kind: module
+name: o-apk-api-surface
+description: Filter endpoints.txt to in-scope apex -> api/ hosts urls paths
+tags: api, surface, research
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: apex
+    default: "{{apex}}"
+  - name: endpoints_file
+    default: "{{Output}}/static/endpoints.txt"
+  - name: api_out
+    default: "{{Output}}/api"
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+steps:
+  - name: filter-api
+    type: bash
+    log: "{{api_out}}/osmedeus-filter.log"
+    commands:
+      - |
+        set -e
+        mkdir -p "{{api_out}}"
+        APEX="{{apex}}"
+        EP="{{endpoints_file}}"
+        OUT="{{api_out}}"
+        test -f "$EP"
+        APEX_RE="${APEX//./\\.}"
+        grep -n "$APEX_RE" "$EP" > "$OUT/endpoints-org.txt" || true
+        grep -oE "[A-Za-z0-9.-]+\.${APEX_RE}" "$EP" | sort -u > "$OUT/hosts-in-scope.txt"
+        grep -oE 'https?://[^[:space:]"'\''<>]+' "$EP" | grep "$APEX_RE" | sort -u > "$OUT/urls-org.txt" || true
+        grep -oE '/[A-Za-z0-9_./-]{3,}' "$EP" | grep -Ei 'api|auth|oauth|graphql|v[0-9]' | sort -u | head -200 > "$OUT/paths-of-interest.txt" || true
+        {
+          echo "# api-surface regen $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "hosts: $(wc -l < "$OUT/hosts-in-scope.txt")"
+          echo "urls: $(wc -l < "$OUT/urls-org.txt")"
+          echo "paths: $(wc -l < "$OUT/paths-of-interest.txt")"
+        } > "$OUT/api-surface.md"
+        wc -l "$OUT"/* > "$OUT/counts.txt"
