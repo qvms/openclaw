@@ -1,0 +1,34 @@
+kind: flow
+name: o-api-tech-map
+description: Map API technology (OpenAPI/Swagger, GraphQL, REST, gRPC-web, JSON:API, HATEOAS, SOAP/WSDL, gateways) from recon artifacts + optional gated in-scope curated path probe
+tags: api-tech, recon-http-fp, mapping, no-screenshot, quiet
+help:
+  example_targets: ['example.com', '<target-from-scope>']
+  usage: |
+    export PATH="$HOME/.local/bin:$PATH"
+    # structure-only validate
+    <engine> workflow validate figs/
+    # passive harvest (safe, reads existing fingerprint/probing artifacts)
+    <engine> run -F figs -f o-api-tech-map -t <target-from-scope> \
+      -x recon-screenshot --dry-run --disable-logging --silent
+    # gated active curated-path probe on CLEARed in-scope hosts (UA enforced)
+    <engine> run -F figs -f o-api-tech-map -t <target-from-scope> \
+      -p ApiActiveProbe=true \
+      -p ScopeFile=<Output>/vuln/targets-https-live.txt \
+      -x recon-screenshot --disable-logging --silent
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: ApiActiveProbe
+    type: bool
+    default: false
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+      default: "example.com"
+modules:
+  - name: mod-api-tech-map
+    path: modules/mod-api-tech-map.yaml

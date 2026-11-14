@@ -1,0 +1,193 @@
+kind: module
+name: mod-api-tech-map
+description: Map API technology (OpenAPI/Swagger, GraphQL, REST, gRPC-web, JSON:API, HATEOAS, SOAP/WSDL, gateways) from recon artifacts + optional in-scope curated path probe
+tags: api-tech, recon-http-fp, mapping, no-screenshot, quiet
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: ScopeFile
+    type: string
+    default: "{{Output}}/vuln/targets-https-live.txt"
+  - name: OosDenylist
+    type: string
+    default: "{{Output}}/seeds/oos-denylist.txt"
+  - name: SigFile
+    type: string
+    default: "sigs/api-tech-signatures.yaml"
+  - name: ApiActiveProbe
+    type: bool
+    default: false
+  - name: ProbeConcurrency
+    type: string
+    default: "20"
+  - name: ProbeRateLimit
+    type: string
+    default: "40"
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+      default: "example.com"
+steps:
+  - name: setup-dirs
+    type: function
+    log: "{{Output}}/api-tech/setup.log"
+    functions:
+      - 'create_folder("{{Output}}/api-tech")'
+      - 'create_folder("{{Output}}/vuln")'
+
+  - name: enforce-chrome-mac-ua
+    type: bash
+    log: "{{Output}}/api-tech/ua.log"
+    commands:
+      - |
+        set -u
+        OUT="{{Output}}/api-tech"
+        mkdir -p "$OUT"
+        SCRIPT=""
+        for cand in "scripts/enforce-chrome-mac-ua.sh" "{{Workflows}}/scripts/enforce-chrome-mac-ua.sh" "../scripts/enforce-chrome-mac-ua.sh"; do
+          [ -f "$cand" ] && SCRIPT="$cand" && break
+        done
+        if [ -z "$SCRIPT" ]; then
+          echo "FATAL: enforce-chrome-mac-ua.sh not found — refusing to emit HTTP without enforced UA" >&2
+          exit 1
+        fi
+        # Remote script API: header | print | check | export | audit | rewrite (no --write).
+        bash "$SCRIPT" check || exit 1
+        bash "$SCRIPT" header > "$OUT/ua-header.txt"
+        bash "$SCRIPT" print  > "$OUT/ua-string.txt"
+        echo "UA enforced via $SCRIPT -> $OUT/ua-header.txt"
+
+  - name: passive-harvest
+    type: bash
+    log: "{{Output}}/api-tech/passive.log"
+    commands:
+      - |
+        set -u
+        OUT="{{Output}}/api-tech"
+        SIG="{{SigFile}}"
+        FP="{{Output}}/fingerprint"
+        PROB="{{Output}}/probing"
+        # Reset per-run outputs so a rerun never retains stale evidence.
+        : > "${OUT}/signals.jsonl"
+        : > "${OUT}/raw-signals.txt"
+        note() { printf '{"host":"%s","class":"%s","signal":"%s","src":"%s"}\n' "$1" "$2" "$3" "$4" >> "${OUT}/signals.jsonl"; }
+        # signal-regex ':::' class. Keep in sync with Ot-yaml/api-tech-signatures.yaml.
+        SIGMAP='
+        swagger|openapi:::openapi-swagger
+        "paths":::openapi-paths
+        graphql:::graphql
+        application/grpc-web|grpc-status:::grpc-web
+        vnd\.api\+json|"jsonapi":::jsonapi
+        hal\+json|"_links":::hal
+        problem\+json:::problem-json
+        odata-version:::odata
+        wsdl:::soap-wsdl
+        x-kong-:::gateway-kong
+        x-amzn-|apigw-requestid:::gateway-aws
+        x-envoy-:::gateway-envoy
+        x-apollo-:::apollo'
+        # Collect candidate artifact files (httpx-* preferred per handoff contract).
+        FILES=""
+        for d in "$FP" "$PROB"; do
+          [ -d "$d" ] && FILES="$FILES $(ls "$d"/httpx-* 2>/dev/null) $(ls "$d"/http-* 2>/dev/null)"
+        done
+        if [ -z "$(echo $FILES)" ]; then
+          echo "no fingerprint/probing artifacts yet — passive harvest is a no-op (run recon-http-fp first)"
+          echo "passive_signal_count=0" > "${OUT}/passive-status.txt"
+          exit 0
+        fi
+        for f in $FILES; do
+          [ -f "$f" ] || continue
+          printf '%s\n' "$SIGMAP" | while IFS= read -r pair; do
+            [ -z "$pair" ] && continue
+            rx="${pair%%:::*}"; cls="${pair##*:::}"
+            grep -aiE "$rx" "$f" 2>/dev/null | while IFS= read -r line; do
+              host="$(printf '%s' "$line" | grep -aoE 'https?://[^"/ ]+' | head -1)"
+              [ -z "$host" ] && host="$(printf '%s' "$line" | sed -nE 's/.*"input"[^"]*"([^"]+)".*/\1/p' | head -1)"
+              [ -z "$host" ] && host="unknown"
+              tok="$(printf '%s' "$line" | grep -aoiE "$rx" | head -1)"
+              note "$host" "$cls" "$tok" "$(basename "$f")"
+            done
+            # also keep a flat raw line record for auditing
+            grep -aiE "$rx" "$f" 2>/dev/null | sed 's/[[:space:]]\{1,\}/ /g' >> "${OUT}/raw-signals.txt"
+          done
+        done
+        # Dedupe structured + raw outputs in place.
+        sort -u "${OUT}/signals.jsonl" -o "${OUT}/signals.jsonl" 2>/dev/null || true
+        sort -u "${OUT}/raw-signals.txt" -o "${OUT}/raw-signals.txt" 2>/dev/null || true
+        SC=$(wc -l < "${OUT}/signals.jsonl" 2>/dev/null | tr -d ' ')
+        echo "passive_signal_count=${SC}" > "${OUT}/passive-status.txt"
+        echo "passive-harvest done -> ${OUT}/signals.jsonl (${SC} structured signals) + raw-signals.txt"
+
+  - name: active-curated-probe
+    type: bash
+    pre_condition: "{{ApiActiveProbe}}"
+    log: "{{Output}}/api-tech/active.log"
+    commands:
+      - |
+        set -u
+        OUT="{{Output}}/api-tech"
+        UA_HEADER_FILE="${OUT}/ua-header.txt"
+        SCOPE="{{ScopeFile}}"
+        DENY="{{OosDenylist}}"
+        if [ ! -s "$UA_HEADER_FILE" ]; then echo "FATAL: UA header file missing — refusing active probe" >&2; exit 1; fi
+        UA="$(sed 's/^User-Agent: //' "$UA_HEADER_FILE")"
+        if [ ! -s "$SCOPE" ]; then
+          echo "no in-scope live hosts in ${SCOPE} — skipping active probe (nothing CLEARed)"
+          echo "active_probe_status=skipped-no-scope" > "${OUT}/active-status.txt"
+          exit 0
+        fi
+        TARGETS="${OUT}/probe-targets.txt"
+        if [ -s "$DENY" ]; then grep -avFf "$DENY" "$SCOPE" | sort -u > "$TARGETS"; else sort -u "$SCOPE" > "$TARGETS"; fi
+        PATHS="${OUT}/probe-paths.txt"
+        grep -aoE '"(/[^"]+|\?wsdl)"' "{{SigFile}}" | tr -d '"' | sort -u > "$PATHS"
+        echo "active probe: $(wc -l < "$TARGETS") hosts x $(wc -l < "$PATHS") curated paths (UA enforced)"
+        if ! command -v httpx >/dev/null 2>&1; then
+          echo "httpx not on PATH in this engine step — active probe skipped (passive signals still written)"
+          echo "active_probe_status=skipped-no-tool" > "${OUT}/active-status.txt"
+          exit 0
+        fi
+        : > "${OUT}/probe-urls.txt"
+        while IFS= read -r h; do
+          hb="${h%/}"
+          while IFS= read -r p; do
+            case "$p" in \?*) echo "${hb}/${p}";; *) echo "${hb}${p}";; esac
+          done < "$PATHS"
+        done < "$TARGETS" | sort -u > "${OUT}/probe-urls.txt"
+        httpx -l "${OUT}/probe-urls.txt" \
+          -H "User-Agent: ${UA}" \
+          -silent -no-color -json \
+          -status-code -content-type -title -web-server -tech-detect \
+          -rate-limit "{{ProbeRateLimit}}" -threads "{{ProbeConcurrency}}" \
+          -o "${OUT}/httpx-api-tech-{{Target}}.jsonl" 2>>"${OUT}/active.log"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "FATAL: active probe httpx exited ${rc} — see ${OUT}/active.log; NOT reporting success" >&2
+          echo "active_probe_status=failed rc=${rc}" > "${OUT}/active-status.txt"
+          exit "$rc"
+        fi
+        echo "active_probe_status=ok" > "${OUT}/active-status.txt"
+        echo "active probe done -> ${OUT}/httpx-api-tech-{{Target}}.jsonl"
+
+  - name: summarize
+    type: bash
+    log: "{{Output}}/api-tech/summary.log"
+    commands:
+      - |
+        set -u
+        OUT="{{Output}}/api-tech"
+        PSTATUS="$( [ -f "${OUT}/active-status.txt" ] && cat "${OUT}/active-status.txt" || echo "active_probe_status=not-run" )"
+        {
+          echo "# API-tech map summary (quiet)"
+          echo "target={{Target}}"
+          echo "passive_structured_signals=$( [ -f "${OUT}/signals.jsonl" ] && wc -l < "${OUT}/signals.jsonl" || echo 0 )"
+          echo "passive_raw_signal_lines=$(sort -u "${OUT}/raw-signals.txt" 2>/dev/null | wc -l)"
+          echo "active_probe_requested={{ApiActiveProbe}}"
+          echo "${PSTATUS}"
+          echo "active_results=$( [ -f "${OUT}/httpx-api-tech-{{Target}}.jsonl" ] && wc -l < "${OUT}/httpx-api-tech-{{Target}}.jsonl" || echo 0 )"
+          echo "ua=$(cat "${OUT}/ua-string.txt" 2>/dev/null)"
+        } > "${OUT}/summary.txt"
+        cat "${OUT}/summary.txt"

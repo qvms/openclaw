@@ -1,0 +1,25 @@
+kind: module
+name: mod-targets-https-live
+description: Build vuln/targets-https-live.txt (https:// only) from probing/httpx-<apex>.txt; fail loud if input missing/empty
+tags: surface, channel-o, omarchy, handoff, gate, no-network
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: HardSkipRegex
+    default: ""
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+steps:
+  - name: setup-dirs
+    type: function
+    functions:
+      - 'create_folder("{{Output}}/vuln")'
+  - name: build-targets-https-live
+    type: bash
+    log: "{{Output}}/vuln/targets-https-live.log"
+    commands:
+      - 'SRC=""; for c in "{{Output}}/probing/httpx-{{Target}}.txt" "{{Output}}/probing/http-{{Target}}.txt"; do if [ -s "$c" ]; then SRC="$c"; break; fi; done; if [ -z "$SRC" ]; then echo "FAIL-LOUD: no httpx input (probing/httpx-{{Target}}.txt missing/empty)" >&2; exit 2; fi; awk "{print \$1}" "$SRC" | grep -E "^https://" > "{{Output}}/vuln/targets-https-live.txt.raw"; if [ -n "{{HardSkipRegex}}" ]; then grep -Ev "{{HardSkipRegex}}" "{{Output}}/vuln/targets-https-live.txt.raw" | sort -u > "{{Output}}/vuln/targets-https-live.txt.tmp"; SK=$(awk "{print \$1}" "$SRC" | grep -Ec "{{HardSkipRegex}}" || true); else sort -u "{{Output}}/vuln/targets-https-live.txt.raw" > "{{Output}}/vuln/targets-https-live.txt.tmp"; SK=0; fi; rm -f "{{Output}}/vuln/targets-https-live.txt.raw"; mv "{{Output}}/vuln/targets-https-live.txt.tmp" "{{Output}}/vuln/targets-https-live.txt"; N=$(wc -l < "{{Output}}/vuln/targets-https-live.txt"); echo "src=$SRC https_live=$N hard_skip_excluded=$SK"; if [ "$N" -eq 0 ]; then echo "FAIL-LOUD: targets-https-live.txt has 0 lines for {{Target}}" >&2; exit 3; fi'
