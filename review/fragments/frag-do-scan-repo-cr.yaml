@@ -1,0 +1,371 @@
+kind: module
+name: frag-do-scan-repo-cr
+description: Code-review SAST+secrets on a LOCAL folder or gated git URL (no katana)
+tags: sast, secrets, code-review, kingfisher, semgrep, trivy, bearer, quiet, no-screenshot
+
+preferences:
+  silent: true
+  disable_notifications: true
+  disable_logging: true
+
+params:
+  - name: repoFolder
+    default: "{{Output}}/source-repo"
+
+  - name: preferLocal
+    default: "true"
+
+  - name: allowClone
+    default: "false"
+
+  - name: gitDepth
+    default: "1"
+
+  - name: semgrepJobs
+    default: "4"
+
+  - name: kingfisherJobs
+    default: "4"
+
+  - name: runBearer
+    default: "true"
+
+  - name: skipTrivyDbUpdate
+    default: "true"
+
+  - name: semgrepSarif
+    default: "{{Output}}/sast/semgrep-{{TargetSpace}}.sarif"
+
+  - name: semgrepJson
+    default: "{{Output}}/sast/semgrep-{{TargetSpace}}.json"
+
+  - name: kingfisherSarif
+    default: "{{Output}}/secret/kingfisher-{{TargetSpace}}.sarif"
+
+  - name: trivySarif
+    default: "{{Output}}/sast/trivy-report-{{TargetSpace}}.sarif"
+
+  - name: bearerSarif
+    default: "{{Output}}/sast/bearer-{{TargetSpace}}.sarif"
+
+  - name: semgrepMarkdown
+    default: "{{Output}}/sast/semgrep-{{TargetSpace}}.md"
+
+  - name: kingfisherMarkdown
+    default: "{{Output}}/secret/kingfisher-{{TargetSpace}}.md"
+
+  - name: trivyMarkdown
+    default: "{{Output}}/sast/trivy-report-{{TargetSpace}}.md"
+
+  - name: bearerMarkdown
+    default: "{{Output}}/sast/bearer-{{TargetSpace}}.md"
+
+dependencies:
+  commands:
+    - kingfisher
+    - trivy
+    - semgrep
+  variables:
+    - name: Target
+      type: string
+      required: true
+
+reports:
+  - name: semgrep-sarif
+    path: "{{semgrepSarif}}"
+    type: text
+    description: Semgrep SARIF results
+
+  - name: kingfisher-sarif
+    path: "{{kingfisherSarif}}"
+    type: text
+    description: Kingfisher SARIF results
+
+  - name: trivy-sarif
+    path: "{{trivySarif}}"
+    type: text
+    description: Trivy SARIF results
+
+  - name: bearer-sarif
+    path: "{{bearerSarif}}"
+    type: text
+    description: Bearer SARIF results
+    optional: true
+
+  - name: semgrep-markdown
+    path: "{{semgrepMarkdown}}"
+    type: text
+    description: Semgrep markdown report
+
+  - name: kingfisher-markdown
+    path: "{{kingfisherMarkdown}}"
+    type: text
+    description: Kingfisher markdown report
+
+  - name: trivy-markdown
+    path: "{{trivyMarkdown}}"
+    type: text
+    description: Trivy markdown report
+
+  - name: bearer-markdown
+    path: "{{bearerMarkdown}}"
+    type: text
+    description: Bearer markdown report
+    optional: true
+
+  - name: cr-status
+    path: "{{Output}}/cr/STATUS.txt"
+    type: text
+    description: CR STATUS (SARIF presence + sizes)
+
+steps:
+  - name: create-output-folders
+    type: function
+    log: "Creating CR output folders (sast/secret/cr)"
+    functions:
+      - 'create_folder("{{Output}}/sast")'
+      - 'create_folder("{{Output}}/secret")'
+      - 'create_folder("{{Output}}/cr")'
+
+  - name: use-local-folder
+    type: bash
+    log: "Binding local source tree (symlink/in-place)"
+    commands:
+      - |
+        set -e
+        mkdir -p "{{Output}}/cr"
+        if [ -d "{{Target}}" ]; then
+          printf '%s\n' "{{Target}}" > "{{Output}}/cr/repo-root.txt"
+          if [ "{{repoFolder}}" = "{{Target}}" ]; then
+            echo "in-place scan root={{Target}}" >> "{{Output}}/cr/bind.log"
+          else
+            # remove prior link/dir only if it is our bind target — never wipe handoff
+            if [ -L "{{repoFolder}}" ]; then
+              rm -f "{{repoFolder}}"
+            elif [ -d "{{repoFolder}}" ] && [ "{{repoFolder}}" != "{{Target}}" ]; then
+              # only remove empty or previous Output/source-repo, not handoff paths
+              case "{{repoFolder}}" in
+                "{{Output}}"/*)
+                  rm -rf "{{repoFolder}}"
+                  ;;
+                *)
+                  echo "refuse to remove non-Output repoFolder={{repoFolder}}" >> "{{Output}}/cr/bind.log"
+                  exit 1
+                  ;;
+              esac
+            fi
+            mkdir -p "$(dirname "{{repoFolder}}")"
+            ln -sfn "{{Target}}" "{{repoFolder}}"
+            echo "symlinked {{repoFolder}} -> {{Target}}" >> "{{Output}}/cr/bind.log"
+          fi
+        else
+          echo "NOT_A_DIR" > "{{Output}}/cr/repo-root.txt"
+          echo "Target is not a directory: {{Target}}" >> "{{Output}}/cr/bind.log"
+        fi
+
+  - name: clone-if-allowed
+    type: bash
+    log: "Optional gated clone (allowClone={{allowClone}})"
+    commands:
+      - |
+        set -e
+        mkdir -p "{{Output}}/cr"
+        if [ -d "{{repoFolder}}" ] || [ -L "{{repoFolder}}" ]; then
+          echo "source already bound; skip clone" >> "{{Output}}/cr/clone.log"
+          exit 0
+        fi
+        if [ "{{allowClone}}" != "true" ]; then
+          echo "clone skipped (allowClone=false)" >> "{{Output}}/cr/clone.log"
+          # If Target looks like URL and no local bind, fail loud below in ensure-source
+          exit 0
+        fi
+        case "{{Target}}" in
+          https://github.com/*|git@github.com:*)
+            mkdir -p "$(dirname "{{repoFolder}}")"
+            rm -rf "{{repoFolder}}"
+            git clone --depth={{gitDepth}} "{{Target}}" "{{repoFolder}}"
+            echo "cloned {{Target}} -> {{repoFolder}} depth={{gitDepth}}" >> "{{Output}}/cr/clone.log"
+            ;;
+          *)
+            echo "refuse non-github clone target: {{Target}}" >> "{{Output}}/cr/clone.log"
+            exit 1
+            ;;
+        esac
+
+  - name: ensure-source-ready
+    type: bash
+    log: "Verifying repoFolder exists before scans"
+    commands:
+      - |
+        set -e
+        if [ ! -d "{{repoFolder}}" ] && [ ! -L "{{repoFolder}}" ]; then
+          {
+            echo "FATAL: no source at repoFolder={{repoFolder}}"
+            echo "target={{Target}}"
+            echo "allowClone={{allowClone}}"
+            echo "hint: pass -t /path/to/local/checkout -p repoFolder=/path/to/local/checkout"
+            echo "hint: or -p allowClone=true for gated github clone only"
+          } | tee "{{Output}}/cr/FATAL.txt"
+          exit 1
+        fi
+        # resolve symlink for existence of real tree
+        if [ -L "{{repoFolder}}" ] && [ ! -d "{{repoFolder}}" ]; then
+          echo "FATAL: broken symlink repoFolder={{repoFolder}}" | tee "{{Output}}/cr/FATAL.txt"
+          exit 1
+        fi
+        echo "ok source=$(readlink -f "{{repoFolder}}" 2>/dev/null || echo "{{repoFolder}}")" > "{{Output}}/cr/source-ok.txt"
+
+  - name: detect-repo-language
+    type: function
+    log: "Detecting primary language of the repository"
+    functions:
+      - 'var repoLanguage = detect_language("{{repoFolder}}") ; printf("Detecting primary language of the repository: " + repoLanguage)'
+    exports:
+      repoLanguage: 'detect_language("{{repoFolder}}")'
+
+  - name: semgrep-scan
+    type: bash
+    log: "Running semgrep static analysis (jobs={{semgrepJobs}})"
+    commands:
+      - "semgrep scan --quiet --config auto --jobs={{semgrepJobs}} --json-output={{semgrepJson}} --sarif-output={{semgrepSarif}} {{repoFolder}}"
+    on_error:
+      - action: continue
+
+  - name: kingfisher-scan
+    type: bash
+    log: "Running kingfisher secret scan (jobs={{kingfisherJobs}})"
+    commands:
+      - "kingfisher --quiet scan {{repoFolder}} --jobs {{kingfisherJobs}} --format sarif --output {{kingfisherSarif}}"
+    on_error:
+      - action: continue
+
+  - name: trivy-scan
+    type: bash
+    log: "Running trivy filesystem scan (skipTrivyDbUpdate={{skipTrivyDbUpdate}})"
+    commands:
+      - |
+        set +e
+        EXTRA=""
+        if [ "{{skipTrivyDbUpdate}}" = "true" ]; then
+          EXTRA="--skip-db-update"
+        fi
+        trivy --quiet fs $EXTRA {{repoFolder}} --format sarif --output {{trivySarif}}
+        rc=$?
+        if [ $rc -ne 0 ] && [ "{{skipTrivyDbUpdate}}" = "true" ]; then
+          # cold DB fallback once
+          trivy --quiet fs {{repoFolder}} --format sarif --output {{trivySarif}}
+          rc=$?
+        fi
+        exit 0
+    on_error:
+      - action: continue
+
+  - name: bearer-scan
+    type: bash
+    log: "Running bearer SAST (always when runBearer=true; not gated on semgrep)"
+    commands:
+      - |
+        set +e
+        if [ "{{runBearer}}" = "true" ]; then
+          bearer scan {{repoFolder}} --hide-progress-bar --format sarif --output {{bearerSarif}} || true
+        else
+          echo "bearer skipped (runBearer=false)" >> "{{Output}}/cr/bearer.log"
+        fi
+        exit 0
+    on_error:
+      - action: continue
+
+  - name: import-semgrep-sarif
+    type: function
+    log: "Importing semgrep SARIF results into database"
+    pre_condition: 'file_exists("{{semgrepSarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{semgrepSarif}}")'
+    on_error:
+      - action: continue
+
+  - name: import-kingfisher-sarif
+    type: function
+    log: "Importing kingfisher SARIF results into database"
+    pre_condition: 'file_exists("{{kingfisherSarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{kingfisherSarif}}")'
+    on_error:
+      - action: continue
+
+  - name: import-trivy-sarif
+    type: function
+    log: "Importing trivy SARIF results into database"
+    pre_condition: 'file_exists("{{trivySarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{trivySarif}}")'
+    on_error:
+      - action: continue
+
+  - name: import-bearer-sarif
+    type: function
+    log: "Importing bearer SARIF results into database"
+    pre_condition: 'file_exists("{{bearerSarif}}")'
+    functions:
+      - 'db_import_sarif("{{Workspace}}", "{{bearerSarif}}")'
+    on_error:
+      - action: continue
+
+  - name: semgrep-markdown-report
+    type: function
+    log: "Converting semgrep SARIF to markdown report"
+    pre_condition: 'file_exists("{{semgrepSarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{semgrepSarif}}", "{{semgrepMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: kingfisher-markdown-report
+    type: function
+    log: "Converting kingfisher SARIF to markdown report"
+    pre_condition: 'file_exists("{{kingfisherSarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{kingfisherSarif}}", "{{kingfisherMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: trivy-markdown-report
+    type: function
+    log: "Converting trivy SARIF to markdown report"
+    pre_condition: 'file_exists("{{trivySarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{trivySarif}}", "{{trivyMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: bearer-markdown-report
+    type: function
+    log: "Converting bearer SARIF to markdown report"
+    pre_condition: 'file_exists("{{bearerSarif}}")'
+    functions:
+      - 'convert_sarif_to_markdown("{{bearerSarif}}", "{{bearerMarkdown}}")'
+    on_error:
+      - action: continue
+
+  - name: write-cr-status
+    type: bash
+    log: "Writing CR STATUS.txt"
+    commands:
+      - |
+        {
+          echo "target={{Target}}"
+          echo "repoFolder={{repoFolder}}"
+          echo "repoLanguage={{repoLanguage}}"
+          echo "allowClone={{allowClone}}"
+          echo "runBearer={{runBearer}}"
+          echo "skipTrivyDbUpdate={{skipTrivyDbUpdate}}"
+          echo "semgrepJobs={{semgrepJobs}}"
+          echo "kingfisherJobs={{kingfisherJobs}}"
+          for f in "{{semgrepSarif}}" "{{kingfisherSarif}}" "{{trivySarif}}" "{{bearerSarif}}"; do
+            if [ -f "$f" ]; then
+              echo "ok $f $(wc -c < "$f")"
+            else
+              echo "MISSING $f"
+            fi
+          done
+        } > "{{Output}}/cr/STATUS.txt"

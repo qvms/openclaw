@@ -1,0 +1,37 @@
+kind: flow
+name: o-code-review-batch
+description: Code-review many local paths from a seed file (BBP CR batch)
+tags: code-review, sast, secrets, batch, quiet, no-screenshot
+help:
+  example_targets:
+    - '/home/box/workspaces-osmedeus/_scope/cr-seeds-<label>.txt'
+  usage: |
+    export PATH="$HOME/.local/bin:$HOME/osmedeus-base/external-binaries:$PATH"
+    SCOPE=/home/box/workspaces-osmedeus/_scope
+    # Example build (absolute local dirs only):
+    #   echo /home/box/workspaces-source/<handle>/<org>/source/<tree> \
+    #     > "$SCOPE/cr-seeds-<handle>.txt"
+    #   ls -d /home/box/workspaces-source/<handle>/<org>/source/* \
+    #     > "$SCOPE/cr-seeds-<handle>.txt"
+    osmedeus run -F review -f o-code-review-batch \
+      -t "$SCOPE/cr-seeds-<label>.txt" \
+      --disable-logging --silent --threads-hold 4 --concurrency 1
+params:
+  - name: repoListFile
+    default: "{{Target}}"
+  - name: flowsDir
+    default: "review"
+  - name: batchThreads
+    default: "1"
+preferences:
+  silent: true
+  disable_notifications: true
+  disable_logging: true
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+modules:
+  - name: mod-cr-scan-batch
+    path: modules/mod-cr-scan-batch.yaml
