@@ -1,0 +1,31 @@
+kind: flow
+name: o-surface-omarchy
+description: Channel O surface phase on Omarchy — util-archive, enum-ipspace, probe-port, recon-screenshot, targets-https-live, fail-loud gate
+tags: surface, channel-o, omarchy, screenshots, fail-loud
+help:
+  example_targets: ['example.com']
+  usage: |
+    # On Omarchy, inside tmux session O (window surface-{{apex}}):
+    osmedeus run -F figs -f o-surface-omarchy -t example.com \
+      --threads-hold 8 --concurrency 1
+preferences:
+  silent: true
+  disable_notifications: true
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+modules:
+  - name: mod-targets-https-live
+    path: modules/mod-targets-https-live.yaml
+  - name: util-archive
+    path: common/util-archive.yaml
+  - name: enum-ipspace
+    path: common/enum-ipspace.yaml
+  - name: probe-port
+    path: common/probe-port.yaml
+  - name: recon-screenshot
+    path: common/recon-screenshot.yaml
+  - name: mod-surface-fail-loud-gate
+    path: modules/mod-surface-fail-loud-gate.yaml

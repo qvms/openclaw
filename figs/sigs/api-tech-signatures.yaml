@@ -1,0 +1,87 @@
+kind: data
+name: api-tech-signatures
+version: 1
+
+header_signals:
+  openapi_swagger:
+    - "swagger"
+    - "openapi"
+  graphql:
+    - "x-graphql"
+    - "graphql"
+  grpc_web:
+    - "application/grpc-web"
+    - "application/grpc-web+proto"
+    - "grpc-status"
+    - "grpc-message"
+  json_api:
+    - "application/vnd.api+json"
+  hal_hateoas:
+    - "application/hal+json"
+    - "application/prs.hal-forms+json"
+  problem_json:
+    - "application/problem+json"
+  odata:
+    - "odata-version"
+  soap_wsdl:
+    - "application/soap+xml"
+  api_gateway:
+    - "x-kong-"
+    - "x-amzn-"
+    - "apigw-requestid"
+    - "x-azure-ref"
+    - "x-envoy-"
+    - "x-apollo-"
+
+body_signals:
+  openapi_swagger:
+    - '"swagger"\s*:'
+    - '"openapi"\s*:\s*"3'
+    - '"paths"\s*:\s*\{'
+  graphql_introspection_hint:
+    - '"errors"\s*:\s*\[.*"message"'
+    - "Cannot query field"
+    - "GraphQL"
+    - "must provide query string"
+  json_api:
+    - '"jsonapi"\s*:'
+  hateoas:
+    - '"_links"\s*:'
+    - '"_embedded"\s*:'
+  wsdl:
+    - "<wsdl:definitions"
+    - "<definitions"
+
+probe_paths:
+  openapi:
+    - "/openapi.json"
+    - "/openapi.yaml"
+    - "/swagger.json"
+    - "/swagger/v1/swagger.json"
+    - "/v3/api-docs"
+    - "/api-docs"
+    - "/swagger-ui/index.html"
+    - "/redoc"
+  rest_roots:
+    - "/api"
+    - "/api/v1"
+    - "/api/v2"
+    - "/api/v3"
+    - "/rest"
+  graphql:
+    - "/graphql"
+    - "/api/graphql"
+    - "/v1/graphql"
+    - "/query"
+  well_known:
+    - "/.well-known/"
+    - "/.well-known/openid-configuration"
+    - "/.well-known/oauth-authorization-server"
+    - "/.well-known/security.txt"
+    - "/.well-known/apple-app-site-association"
+    - "/.well-known/assetlinks.json"
+  soap:
+    - "?wsdl"
+    - "/services"
+
+meaningful_statuses: [200, 201, 204, 400, 401, 403, 405, 422]

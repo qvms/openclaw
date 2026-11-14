@@ -1,0 +1,68 @@
+kind: module
+name: o-deepen-hotspots
+description: Deepen config.json / API 401 / graphql / CORS on locked in-scope hosts (Osmedeus bash)
+tags: deepen, graphql, cors, research
+preferences:
+  silent: true
+  disable_notifications: true
+params:
+  - name: apex
+    default: "{{apex}}"
+  - name: hosts_file
+    default: "{{Output}}/vuln/targets-https-live.txt"
+  - name: scan_ua
+    default: "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+  - name: out_dir
+    default: "{{Output}}/vuln/iterate/deepen"
+dependencies:
+  variables:
+    - name: Target
+      type: string
+      required: true
+  commands:
+    - curl
+    - jq
+steps:
+  - name: deepen-probes
+    type: bash
+    log: "Deepen graphql/api/CORS on in-scope hotspots"
+    on_error:
+      - action: continue
+    commands:
+      - |
+        set -u
+        OUT="{{out_dir}}"
+        mkdir -p "$OUT"
+        UA='{{scan_ua}}'
+        ORIGIN='https://evil.example'
+        HOSTS="{{hosts_file}}"
+        : > "$OUT/probes.jsonl"
+        probe() {
+          local name="$1"; shift
+          local code body
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w '%{http_code}' --max-time 20 "$@" 2>/dev/null || echo 000)
+          jq -nc --arg n "$name" --arg c "$code" --arg b "$(head -c 2000 "$body" | tr '\n' ' ')" \
+            '{name:$n,status:($c|tonumber),body_head:$b}' >> "$OUT/probes.jsonl" || true
+          rm -f "$body"
+        }
+        # GraphQL introspection / auth-gate probes against the in-scope API host.
+        # Supply concrete URLs via $HOSTS; patterns below are examples only.
+        #   Example GQL:  https://<api-host>/graphql
+        #   Example API:  https://<app-host>/api/
+        while read -r u; do
+          [ -z "$u" ] && continue
+          # CORS reflected-origin check
+          hdr=$(mktemp)
+          code=$(curl -sS -D "$hdr" -o /dev/null -w '%{http_code}' --max-time 15 \
+            -H "$UA" -H "Origin: $ORIGIN" "$u" 2>/dev/null || echo 000)
+          acao=$(grep -i '^access-control-allow-origin:' "$hdr" | tr -d '\r' | head -1 || true)
+          acac=$(grep -i '^access-control-allow-credentials:' "$hdr" | tr -d '\r' | head -1 || true)
+          jq -nc --arg u "$u" --arg c "$code" --arg a "$acao" --arg d "$acac" \
+            '{name:"cors",url:$u,status:($c|tonumber),acao:$a,acac:$d}' >> "$OUT/probes.jsonl" || true
+          rm -f "$hdr"
+          # config.json surface
+          probe "config-$(echo "$u" | sed 's|https://||;s|/|-|g')" -H "$UA" "${u%/}/config.json"
+        done < "$HOSTS"
+        jq -s '{count:length,items:.}' "$OUT/probes.jsonl" > "$OUT/summary.json"
+        wc -l "$OUT/probes.jsonl" > "$OUT/counts.txt"
